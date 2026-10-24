@@ -1,0 +1,382 @@
+{
+  "categories": [
+    "全部",
+    "人工智慧與治理 (L111)",
+    "資料處理與特徵工程",
+    "數值預測任務",
+    "分類判斷任務",
+    "非監督學習",
+    "模型評估與陷阱",
+    "鑑別式與生成式AI (L114)"
+  ],
+  "cards": [
+    {
+      "id": "c1-linreg",
+      "category": "數值預測任務",
+      "title": "線性迴歸 (Linear Regression)",
+      "subtitle": "尋找最佳擬合直線以預測連續數值",
+      "function": "預測連續數值。透過最小化預測值與實際值的殘差平方和（Ordinary Least Squares, OLS），建立特徵與目標數值間的最佳線性關係方程式。",
+      "scenario": "預測下個月房屋成交價、明日氣溫、工廠產能產出量、銷售額、股票價格等「數值預測」情境。",
+      "trap": "只能預測連續數值，不可直接用於分類；極度容易受到極端值（Outliers）拉扯而使直線偏移。",
+      "keywords": [
+        "線性迴歸",
+        "迴歸",
+        "連續",
+        "殘差",
+        "OLS",
+        "最小平方法"
+      ]
+    },
+    {
+      "id": "c1-reg-metrics",
+      "category": "數值預測任務",
+      "title": "迴歸評估指標 (MSE / MAE / RMSE / R²)",
+      "subtitle": "衡量預測數值與真實數值之間的誤差程度",
+      "function": "評估迴歸模型的好壞：MAE（平均絕對誤差，受極端值影響小）；MSE（均方誤差，放大懲罰大誤差）；RMSE（均方根誤差，單位與原數據一致）；R²（判定係數，越接近 1 解釋力越強）。",
+      "scenario": "題目詢問「若希望大幅懲罰預測誤差較大的樣本，應使用何種損失指標？」➔ 選 MSE；若問「哪個指標單位與原資料相同且考慮平方誤差？」➔ 選 RMSE。",
+      "trap": "不可將 Accuracy（準確率）用於迴歸問題；MSE 的單位是原始單位的平方，無法直觀對應實體數值。",
+      "keywords": [
+        "MSE",
+        "MAE",
+        "RMSE",
+        "R²",
+        "均方誤差",
+        "判定係數",
+        "殘差"
+      ]
+    },
+    {
+      "id": "c1-logreg",
+      "category": "分類判斷任務",
+      "title": "邏輯斯迴歸 (Logistic Regression)",
+      "subtitle": "算機率做分類的基礎線性模型",
+      "function": "二元分類演算法。透過 Sigmoid 激活函數將線性方程式的輸出值擠壓到 (0, 1) 區間，將輸出解釋為「屬於某個類別的機率值」。",
+      "scenario": "判斷電子郵件是否為垃圾信、病患是否確診疾病、客戶下個月是否會退租流失、刷卡交易是否異常等二元分類。",
+      "trap": "⚠️ 名字帶有「迴歸」兩個字，但本質是「分類演算法」！決策閥值通常預設為 0.5（大於 0.5 判為正類）。",
+      "keywords": [
+        "logistic",
+        "邏輯",
+        "sigmoid",
+        "二元分類",
+        "勝算比",
+        "odds"
+      ]
+    },
+    {
+      "id": "c1-dt",
+      "category": "分類判斷任務",
+      "title": "決策樹 (Decision Tree)",
+      "subtitle": "具備高度可解釋性的樹狀規則模型",
+      "function": "透過樹狀架構的一系列 If-Then 判斷規則進行分類或迴歸。每次分裂依據資訊獲利（Information Gain）或基尼不純度（Gini Impurity）選取最佳特徵。",
+      "scenario": "需要清楚向客戶或法規審核機構解釋決策原因的場景，例如：銀行核貸審核（月薪 > 5萬 且 信用良好 則核貸）、醫療檢傷分流流程。",
+      "trap": "若樹的分支過深，極度容易產生「過擬合（Overfitting）」死記訓練集；需透過「剪枝（Pruning）」來降低複雜度。",
+      "keywords": [
+        "決策樹",
+        "可解釋",
+        "剪枝",
+        "基尼",
+        "gini",
+        "資訊獲利",
+        "熵",
+        "entropy"
+      ]
+    },
+    {
+      "id": "c1-svm",
+      "category": "分類判斷任務",
+      "title": "支援向量機 (SVM - Support Vector Machine)",
+      "subtitle": "尋找最大邊界超平面的分類器",
+      "function": "在特徵空間中找出一個能將不同類別以「最大邊界（Maximum Margin）」隔開的超平面；遇到非線性可分問題時，利用核函數（Kernel Trick）映射到高維空間進行線性分割。",
+      "scenario": "樣本量不大但特徵維度很高（例如基因檢測、文本特徵、影像辨識），或要求決策邊界泛化能力極強的任務。",
+      "trap": "核函數是把特徵「從低維投影至高維」來尋求線性可分，千萬不要跟降維（如 PCA）搞混！",
+      "keywords": [
+        "SVM",
+        "支援向量",
+        "超平面",
+        "邊界",
+        "核函數",
+        "kernel",
+        "margin"
+      ]
+    },
+    {
+      "id": "c1-rf",
+      "category": "分類判斷任務",
+      "title": "隨機森林與集成學習 (Random Forest & Ensemble)",
+      "subtitle": "集思廣益降低變異的強大武器",
+      "function": "以多棵決策樹組合而成的 Bagging 集成方法。訓練時對樣本與特徵隨機抽樣，最終採多數決投票（分類）或平均（迴歸）輸出結果，能大幅降低過擬合風險與變異度（Variance）。",
+      "scenario": "單一決策樹容易過擬合、泛化效果差時，用隨機森林大幅提升穩定度；比賽與各類 tabular 資料的經典首選強模型。",
+      "trap": "Bagging（並行獨立抽樣，主要降低 Variance，如隨機森林）vs Boosting（循序加權錯誤樣本，主要降低 Bias，如 XGBoost / AdaBoost）。",
+      "keywords": [
+        "隨機森林",
+        "集成",
+        "bagging",
+        "boosting",
+        "投票",
+        "ensemble"
+      ]
+    },
+    {
+      "id": "c1-knn",
+      "category": "分類判斷任務",
+      "title": "K-最近鄰演算法 (KNN - K-Nearest Neighbors)",
+      "subtitle": "近朱者赤近墨者黑的惰性學習法",
+      "function": "一種無須事前訓練參數的惰性學習（Lazy Learning）演算法。預測時直接計算新樣本與所有訓練樣本的距離，找出最近的 K 個鄰居，採多數決投票決定類別。",
+      "scenario": "直觀的相似度比對、推薦系統鄰近比對；題目問「哪種演算法在訓練階段不需建立顯式模型？」選 KNN。",
+      "trap": "KNN 對特徵尺度非常敏感，使用前「必須做特徵縮放（標準化/正規化）」；K 值太小容易過擬合受雜訊影響，K 值太大容易欠擬合。",
+      "keywords": [
+        "KNN",
+        "最近鄰",
+        "歐氏距離",
+        "惰性學習",
+        "lazy"
+      ]
+    },
+    {
+      "id": "c1-kmeans",
+      "category": "非監督學習",
+      "title": "K-Means 分群演算法 (K-Means Clustering)",
+      "subtitle": "事前無標籤，自動依相似度聚集成 K 個群體",
+      "function": "最經典的非監督式分群演算法。依據樣本間的歐氏距離，迭代計算群心位置（Centroids），將所有資料分派至距離最近的群聚中，直到群心不再移動。",
+      "scenario": "資料事前完全沒有標籤（Label）時，進行電商顧客輪廓自動分群、市場區隔、異常偵測（遠離群心的點）。",
+      "trap": "K 值必須人為預先指定（可用手肘法 Elbow Method 輔助選取最佳 K）；對初始群心位置敏感，易受極端離群值拉偏。",
+      "keywords": [
+        "k-means",
+        "分群",
+        "非監督",
+        "群心",
+        "手肘法",
+        "elbow",
+        "距離"
+      ]
+    },
+    {
+      "id": "c1-pca",
+      "category": "非監督學習",
+      "title": "主成分分析 (PCA - Principal Component Analysis)",
+      "subtitle": "保留最大變異量的線性降維技術",
+      "function": "非監督式降維方法。將多個可能高度共線性的特徵，透過正交旋轉投影到少數互不相關的主成分（Principal Components）上，在減少變數數量的同時保留最大的資料變異量。",
+      "scenario": "特徵維度過多導致運算緩慢或維度災難（Curse of Dimensionality）、需要將多維資料降至 2D 或 3D 進行視覺化展示。",
+      "trap": "PCA 是「非監督式」降維，它不參考標籤 Y；降維後產生的主成分特徵往往缺乏直觀的業務物理意義（可解釋性較低）。",
+      "keywords": [
+        "PCA",
+        "主成分",
+        "降維",
+        "維度災難",
+        "特徵萃取",
+        "正交",
+        "變異量"
+      ]
+    },
+    {
+      "id": "c1-over-under",
+      "category": "模型評估與陷阱",
+      "title": "過擬合 vs 欠擬合 (Overfitting vs Underfitting)",
+      "subtitle": "死記硬背 vs 根本沒學會的訓練狀態診斷",
+      "function": "過擬合（Overfitting）：訓練集成績超高但測試集極差，模型硬背了雜訊，泛化能力極低；欠擬合（Underfitting）：訓練集與測試集成績都很差，模型連基本規律都抓不到。",
+      "scenario": "「若模型訓練誤差很小，但驗證誤差很大，應採取何種措施？」➔ 增加訓練數據、簡化模型、加入正規化、Dropout、早停（Early Stopping）。",
+      "trap": "如果模型已經過擬合，千萬不要再「增加模型深度或特徵數量」，這只會讓它過擬合得更嚴重！",
+      "keywords": [
+        "過擬合",
+        "欠擬合",
+        "泛化",
+        "overfitting",
+        "underfitting",
+        "早停",
+        "dropout"
+      ]
+    },
+    {
+      "id": "c1-bias-variance",
+      "category": "模型評估與陷阱",
+      "title": "偏差與變異權衡 (Bias-Variance Tradeoff)",
+      "subtitle": "模型預測總誤差的兩大來源與平衡藝術",
+      "function": "模型總誤差 = 偏差²（Bias²）+ 變異（Variance）+ 不可消除之雜訊。高偏差源於假設過於簡單（導致欠擬合）；高變異源於模型對訓練樣本細微波動過度敏感（導致過擬合）。",
+      "scenario": "「在機器學習中，偏差與變異權衡主要用來解決何種問題？」➔ 如何在模型偏差與變異間取得平衡，以避免過度擬合或欠擬合。",
+      "trap": "兩者往往不可兼得（Trade-off）：模型越複雜，偏差越低但變異越高；目標是找到總誤差最小的甜點（Sweet Spot）。",
+      "keywords": [
+        "偏差",
+        "變異",
+        "權衡",
+        "tradeoff",
+        "bias",
+        "variance",
+        "欠擬合",
+        "過度擬合"
+      ]
+    },
+    {
+      "id": "c1-reg-l1-l2",
+      "category": "模型評估與陷阱",
+      "title": "正則化：L1 (Lasso) vs L2 (Ridge)",
+      "subtitle": "在損失函數中加入懲罰項，抑制權重過大防過擬合",
+      "function": "L1 正規化（Lasso）：加入權重絕對值和（|w|），能使不重要的特徵權重直接壓縮為 0，具備「特徵選取（稀疏解）」效果；L2 正規化（Ridge）：加入權重平方和（w²），將權重平滑縮小但不為 0。",
+      "scenario": "題目問「希望挑選重要特徵並使模型具備稀疏性（Sparse），應採用？」➔ 選 L1 (Lasso)；若問「希望避免權重過大但保留所有特徵？」➔ 選 L2 (Ridge)。",
+      "trap": "L1 產生「稀疏矩陣（部分權重變 0，形同特徵選擇）」；L2「不會讓權重歸零」，只會壓低權重數值。",
+      "keywords": [
+        "L1",
+        "L2",
+        "lasso",
+        "ridge",
+        "正則化",
+        "正規化",
+        "稀疏",
+        "特徵選取"
+      ]
+    },
+    {
+      "id": "c1-confusion-matrix",
+      "category": "模型評估與陷阱",
+      "title": "混淆矩陣與 Precision vs Recall",
+      "subtitle": "精準率與召回率的對決：寧可錯殺，還是寧可漏抓？",
+      "function": "Precision（精準率/查準率）：預測為陽性中，真的對的有幾成（最怕錯殺好人）；Recall（召回率/查全率）：所有真正陽性中，成功抓出來的有幾成（最怕漏掉壞人）；F1-Score：兩者的調和平均數。",
+      "scenario": "「癌症病患篩檢、瑕疵零件檢驗」➔ 寧可多複檢也不要放過病人，要追求高 Recall！「垃圾郵件過濾、推薦廣告」➔ 寧可放過垃圾信也不要刪除重要公文，要追求高 Precision！",
+      "trap": "不可只用 Accuracy（準確率）評估極度不平衡的資料（例如 99% 是正常人，瞎猜全部正常人也有 99% Accuracy，但 Recall 為 0）。",
+      "keywords": [
+        "precision",
+        "recall",
+        "混淆矩陣",
+        "f1",
+        "精確率",
+        "召回率",
+        "tpr",
+        "fpr"
+      ]
+    },
+    {
+      "id": "c1-roc-auc",
+      "category": "模型評估與陷阱",
+      "title": "ROC 曲線與 AUC 指標",
+      "subtitle": "不受特定分類門檻值影響的二元分類綜合實力評估",
+      "function": "ROC 曲線以 FPR（偽陽率，X軸）對比 TPR（真陽率/Recall，Y軸）。AUC（Area Under Curve）為曲線下面積，介於 0.5 ~ 1.0 之間，代表模型區分正負樣本的綜合能力。",
+      "scenario": "比較兩個分類器在各種不同閥值下的綜合優劣。AUC 越接近 1 模型越強；若 AUC = 0.5，代表模型完全沒有分類能力，跟擲硬幣隨機猜測一樣。",
+      "trap": "ROC 曲線左上角點 (0, 1) 代表完美分類器（FPR=0 且 TPR=1）；若曲線剛好在對角線上，AUC 就是 0.5。",
+      "keywords": [
+        "ROC",
+        "AUC",
+        "tpr",
+        "fpr",
+        "真陽率",
+        "偽陽率",
+        "門檻值",
+        "閾值"
+      ]
+    },
+    {
+      "id": "c1-scaling",
+      "category": "資料處理與特徵工程",
+      "title": "特徵縮放：正規化 vs 標準化",
+      "subtitle": "消除不同特徵因單位量綱懸殊產生的偏差",
+      "function": "正規化（Min-Max Normalization）：將數值等比例縮放到 [0, 1] 區間，對極端離群值敏感；標準化（Z-Score Standardization）：將數值轉換為平均數 0、標準差 1 的常態分布，受離群值影響較小。",
+      "scenario": "「身高（170cm）與薪水（50,000元）一起訓練模型」➔ 薪水數值過大會主導距離計算，必須做特徵縮放。涉及距離計算的演算法（KNN, K-Means, SVM, 類神經網路）必須縮放。",
+      "trap": "決策樹與以樹為基底的演算法（隨機森林、XGBoost）是以單一特徵的分界值切分，不需要特徵縮放！",
+      "keywords": [
+        "正規化",
+        "標準化",
+        "特徵縮放",
+        "min-max",
+        "z-score",
+        "scaling",
+        "離群值"
+      ]
+    },
+    {
+      "id": "c1-encoding",
+      "category": "資料處理與特徵工程",
+      "title": "類別變數編碼：One-Hot vs Label Encoding",
+      "subtitle": "把文字文字轉換成機器看得懂的數字",
+      "function": "One-Hot Encoding（獨熱編碼）：適用於無順序關係的類別（如城市：台北/台中/高雄），轉為多個只有 0 與 1 的二元欄位；Label Encoding（標籤編碼）：適用於有次序高低關係的類別（如學歷：高中=1、大學=2、碩士=3）。",
+      "scenario": "若將「紅色=1、黃色=2、藍色=3」用標籤編碼輸入線性模型，模型會誤以為「藍色是紅色的三倍大」而學出錯誤關係，無順序類別務必採用 One-Hot！",
+      "trap": "類別種類很多時（例如 10,000 個郵遞區號），做 One-Hot 會造成維度爆炸（Curse of Dimensionality），需改用其他嵌入或頻率編碼。",
+      "keywords": [
+        "one-hot",
+        "獨熱",
+        "編碼",
+        "label encoding",
+        "標籤編碼",
+        "類別變數"
+      ]
+    },
+    {
+      "id": "ai-definition-governance",
+      "category": "人工智慧與治理 (L111)",
+      "chapter": "L111 人工智慧概念",
+      "syllabusItem": "L11102 AI治理概念",
+      "title": "負責任 AI 與歐盟 AI 法案 (Responsible AI & EU AI Act)",
+      "subtitle": "功能：確保 AI 公平、透明、可解釋與風險分級監管",
+      "function": "將 AI 系統依風險分為「不可接受風險（禁止）、高風險（嚴格合規）、有限風險（透明度揭露）、最小風險」，並落實公平性、可解釋性 (XAI)、問責制與人為監督 (Human-in-the-loop)。",
+      "scenario": "醫療診斷、信貸審核、招募篩選屬於「高風險 AI」，必須具備可解釋性、資料治理與人類最終決策權；深偽 (Deepfake) 聊天機器人則需履行「透明度義務」告知使用者正在與 AI 互動。",
+      "trap": "考題常問：「導入 AI 後發生誤判誰負責？」答案永遠是「部署與使用該系統的組織/人類（問責制）」，AI 本身不具法律人格！",
+      "keywords": [
+        "AI治理",
+        "EU AI Act",
+        "高風險",
+        "可解釋",
+        "公平性",
+        "問責",
+        "人為監督",
+        "倫理"
+      ]
+    },
+    {
+      "id": "data-privacy-security",
+      "category": "資料處理與特徵工程",
+      "chapter": "L112 資料處理與分析概念",
+      "syllabusItem": "L11203 資料隱私與安全",
+      "title": "去識別化、差分隱私與聯邦學習 (Data Privacy & Security)",
+      "subtitle": "功能：在保護個人隱私與合規前提下進行資料分析與建模",
+      "function": "透過「k-匿名性、遮罩、假名化、差分隱私 (Differential Privacy，加入雜訊防推敲)」保護個資；或用「聯邦學習 (Federated Learning)」讓原始資料留在本地、只交換模型參數更新。",
+      "scenario": "多家醫院想共同訓練罕見疾病預測模型，但法規禁止病歷出院 → 選「聯邦學習」；公開統計資料怕被交叉比對還原出特定個人 → 選「差分隱私」。",
+      "trap": "單純「刪除姓名與身分證字號」不代表完全匿名！若保留生日+郵遞區號+性別仍可能被「連結攻擊」重新識別，需滿足 k-匿名性或差分隱私。",
+      "keywords": [
+        "隱私",
+        "去識別",
+        "匿名",
+        "差分隱私",
+        "聯邦學習",
+        "個資",
+        "GDPR"
+      ]
+    },
+    {
+      "id": "discriminative-vs-generative",
+      "category": "鑑別式與生成式AI (L114)",
+      "chapter": "L114 鑑別式AI與生成式AI概念",
+      "syllabusItem": "L11401 鑑別式AI與生成式AI的基本原理",
+      "title": "鑑別式 AI vs. 生成式 AI (Discriminative vs. Generative)",
+      "subtitle": "功能：判斷決策邊界 P(Y|X) vs. 學習資料分佈創造新內容 P(X,Y)",
+      "function": "【鑑別式 AI】學習類別之間的「決策邊界」，用於分類與數值預測（如邏輯迴歸、SVM、隨機森林、BERT）；【生成式 AI】學習資料的「機率分佈」，能無中生有產生全新圖文影音（如 GPT、Diffusion、GAN、VAE）。",
+      "scenario": "判斷一封信「是不是垃圾郵件」、X光片「有沒有腫瘤」→ 鑑別式 AI；根據客戶問題「撰寫一封客製化回覆信」、根據文字「畫出商品概念圖」→ 生成式 AI。",
+      "trap": "生成式 AI 雖然會寫文章，但做「精準結構化數值預測或嚴謹二元分類」時，傳統鑑別式模型（如 XGBoost）往往成本更低、更穩定且無幻覺！",
+      "keywords": [
+        "鑑別式",
+        "生成式",
+        "GAN",
+        "Diffusion",
+        "擴散模型",
+        "機率分佈",
+        "決策邊界"
+      ]
+    },
+    {
+      "id": "rag-hybrid-ai",
+      "category": "鑑別式與生成式AI (L114)",
+      "chapter": "L114 鑑別式AI與生成式AI概念",
+      "syllabusItem": "L11402 鑑別式AI與生成式AI的整合應用",
+      "title": "檢索增強生成與雙 AI 整合架構 (RAG & Hybrid AI)",
+      "subtitle": "功能：結合外部知識庫抑制幻覺 + 串聯鑑別式預測與生成式互動",
+      "function": "【RAG】先用向量檢索找出企業內部最新文件，再交給 LLM 生成有根據的回答；【整合應用】先由鑑別式 AI 預測「客戶流失機率 85%」，再由生成式 AI 自動擬定「個人化挽留優惠信」。",
+      "scenario": "企業法規天天改，不想花大錢天天重新微調 (Fine-tune) 模型，且要求回答附上法條出處、減少幻覺 (Hallucination) → 首選「RAG 檢索增強生成」。",
+      "trap": "RAG 不能改變模型的「說話語氣或深層領域推理風格」（那是微調 Fine-tuning 的強項），但 RAG 在「知識即時更新、低成本、可追溯來源、降低幻覺」完勝微調！",
+      "keywords": [
+        "RAG",
+        "檢索增強",
+        "幻覺",
+        "整合應用",
+        "向量資料庫",
+        "微調",
+        "Fine-tune"
+      ]
+    }
+  ]
+}

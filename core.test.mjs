@@ -54,6 +54,25 @@ const md2 = toMarkdown(qs, { a: { note: '只有筆記沒星標' } });
 assert.ok(md2.includes('只有筆記沒星標'), '有筆記就該收');
 assert.ok(md2.includes('qa'));
 
+// Notion Markdown 測試(含 Active Recall <details> 摺疊)
+import { toNotionMarkdown, buildNotionPagePayload } from './core.js';
+const nmd = toNotionMarkdown(qs, { c: { starred: true, note: '偏差與變異' } });
+assert.ok(nmd.includes('<details>'));
+assert.ok(nmd.includes('<summary>'));
+assert.ok(nmd.includes('偏差與變異'));
+
+// Notion Page Payload 測試
+const payload = buildNotionPagePayload(
+  { id: 't1', level: '初級', subject: '科目1：人工智慧基礎概論', chapter: '模型評估', topic: '偏差與變異權衡', question: '問題內容', options: ['A', 'B', 'C', 'D'], answer: 3, explanation: '解析' },
+  { box: 2, wrong: 1, note: '重點筆記' },
+  'test-db-id',
+  { properties: { Name: { type: 'title' }, Level: { type: 'select' } } }
+);
+assert.equal(payload.parent.database_id, 'test-db-id');
+assert.ok(payload.properties.Name.title[0].text.content.includes('偏差與變異權衡'));
+assert.equal(payload.properties.Level.select.name, '初級');
+assert.ok(payload.children.some((c) => c.type === 'toggle'));
+
 console.log('PASS');
 
 // ---- guessLevel / nextExam ----
@@ -79,4 +98,45 @@ assert.deepEqual(nextExam(EX, '2026-08-15', '初級'), { level: '初級', date: 
 assert.equal(nextExam(EX, '2027-01-01'), null, '全部過期回 null');
 assert.equal(nextExam({}, '2026-08-17'), null);
 
-console.log('PASS (含 guessLevel / nextExam)');
+import { cardToNotionMarkdown } from './core.js';
+const testCard = {
+  id: 'c1-linreg',
+  category: '數值預測任務',
+  title: '線性迴歸 (Linear Regression)',
+  subtitle: '尋找最佳直線',
+  function: '預測連續數值',
+  scenario: '預測房價',
+  trap: '不能做分類',
+  keywords: ['線性迴歸', '迴歸']
+};
+const cardMd = cardToNotionMarkdown(testCard);
+assert.ok(cardMd.includes('線性迴歸 (Linear Regression)'));
+assert.ok(cardMd.includes('數值預測任務'));
+assert.ok(cardMd.includes('預測連續數值'));
+assert.ok(cardMd.includes('不能做分類'));
+
+import { calcNextReview, formatReviewDue } from './core.js';
+const now = 1000000000000;
+const r1 = calcNextReview(0, true, now);
+assert.equal(r1.stage, 1);
+assert.equal(r1.days, 1);
+assert.equal(r1.due, now + 86400000);
+
+const r2 = calcNextReview(1, true, now);
+assert.equal(r2.stage, 2);
+assert.equal(r2.days, 3);
+assert.equal(r2.due, now + 3 * 86400000);
+
+const rFail = calcNextReview(3, false, now);
+assert.equal(rFail.stage, 1);
+assert.equal(rFail.days, 1);
+
+const dueFmt = formatReviewDue(now - 1000, now);
+assert.equal(dueFmt.isDue, true);
+assert.equal(dueFmt.label, '今日到期待複習');
+
+const futureFmt = formatReviewDue(now + 86400000 * 3, now);
+assert.equal(futureFmt.isDue, false);
+assert.equal(futureFmt.label, '3 天後複習');
+
+console.log('PASS (含 guessLevel / nextExam / cardToNotionMarkdown / Ebbinghaus)');

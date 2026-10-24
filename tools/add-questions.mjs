@@ -5,12 +5,13 @@
 //   answer 可填 0-3 或 "A"/"B"/"C"/"D"。chapter/topic/explanation/image 選填。
 //   id 可不填(自動依 梯次-級別-科-序 產生);填了就沿用並檢查唯一。
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const [, , inPath, ...flags] = process.argv;
 const dryRun = flags.includes('--dry-run');
 if (!inPath) { console.error('用法: node tools/add-questions.mjs <new.json> [--dry-run]'); process.exit(1); }
 
-const QFILE = new URL('../questions.json', import.meta.url).pathname;
+const QFILE = fileURLToPath(new URL('../questions.json', import.meta.url));
 const data = JSON.parse(fs.readFileSync(QFILE, 'utf8'));
 const incoming = JSON.parse(fs.readFileSync(inPath, 'utf8'));
 if (!Array.isArray(incoming)) { console.error('輸入要是題目陣列 []'); process.exit(1); }

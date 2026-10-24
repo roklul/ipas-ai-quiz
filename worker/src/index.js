@@ -6,8 +6,8 @@ const CODE_RE = /^[a-z]+-[a-z]+-\d{2,4}$/i;
 const MAX_BYTES = 256 * 1024;
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,PUT,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,Notion-Version',
 };
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { ...CORS, 'Content-Type': 'application/json' } });
@@ -95,6 +95,36 @@ export default {
         const r = await sendPush(env, rec.subscription, { title: 'iPAS 模考測試通知', body: '推播設定成功!每天會在你設定的時間提醒你刷題。', url: './' });
         return json({ ok: true, status: r.status });
       } catch (e) { return json({ error: String(e) }, 500); }
+    }
+
+    // ---- Notion API Proxy ----
+    const nm = url.pathname.match(/^\/notion\/(.*)$/);
+    if (nm) {
+      const subpath = nm[1];
+      const targetUrl = `https://api.notion.com/v1/${subpath}${url.search}`;
+      const authHeader = req.headers.get('Authorization');
+      const notionVer = req.headers.get('Notion-Version') || '2022-06-28';
+      try {
+        const resp = await fetch(targetUrl, {
+          method: req.method,
+          headers: {
+            'Authorization': authHeader || '',
+            'Notion-Version': notionVer,
+            'Content-Type': 'application/json',
+          },
+          body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+        });
+        const bodyText = await resp.text();
+        return new Response(bodyText, {
+          status: resp.status,
+          headers: {
+            ...CORS,
+            'Content-Type': resp.headers.get('Content-Type') || 'application/json',
+          },
+        });
+      } catch (err) {
+        return json({ error: 'notion_proxy_error', message: String(err) }, 502);
+      }
     }
 
     return json({ error: 'not_found' }, 404);

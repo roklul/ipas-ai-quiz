@@ -1,4 +1,4 @@
-import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, reviewPriority, guessLevel, nextExam, MASTER_BOX } from './core.js';
+import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -9,6 +9,7 @@ const view = $('#view');
 
 let DATA = { meta: {}, questions: [] };
 let CONCEPTS = [];
+let GUIDE_DATA = { categories: [], cards: [] };
 let EXAMINFO = null;
 let store = load();
 let pushTimer = null;
@@ -32,10 +33,31 @@ window.addEventListener('appinstalled', dismissInstallBar);
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && s.q) return s;
+    if (s && s.q) {
+      s.cards ||= {};
+      return s;
+    }
   } catch {}
-  return { v: 1, syncCode: makeCode(), codeFresh: true, q: {}, recent: [], updatedAt: 0 };
+  return { v: 1, syncCode: makeCode(), codeFresh: true, q: {}, cards: {}, recent: [], updatedAt: 0 };
 }
+
+// 艾賓浩斯遺忘曲線到期檢索
+function getDueQuestions() {
+  const now = Date.now();
+  return DATA.questions.filter((q) => {
+    const p = store.q[q.id];
+    return p && p.reviewDue && p.reviewDue <= now;
+  });
+}
+
+function getDueCards() {
+  const now = Date.now();
+  return (GUIDE_DATA.cards || []).filter((c) => {
+    const s = store.cards?.[c.id];
+    return s && s.reviewDue && s.reviewDue <= now;
+  });
+}
+
 // 記一筆最近作答結果(1/0)，保留最近 50 筆，供「近期正確率」
 function logRecent(correct) {
   (store.recent ||= []).push(correct ? 1 : 0);
@@ -84,21 +106,28 @@ const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0
 const today = () => ymd(new Date());
 const yesterday = () => { const d = new Date(); d.setDate(d.getDate() - 1); return ymd(d); };
 const dailyGoal = () => (store.settings && store.settings.dailyGoal) || 20;
-const todayCount = () => (store.daily && store.daily.date === today() ? store.daily.count : 0);
+const todayCount = () => {
+  const t = today();
+  const dCount = (store.daily && store.daily.date === t) ? (store.daily.count || 0) : 0;
+  const hCount = (store.history && store.history[t] && store.history[t].a) ? store.history[t].a : 0;
+  return Math.max(dCount, hCount);
+};
 // 顯示用的連續天數：最後達標日是今天或昨天才還活著，否則歸 0
 function liveStreak() {
   const s = store.streak; if (!s || !s.lastDate) return 0;
   return (s.lastDate === today() || s.lastDate === yesterday()) ? s.count : 0;
 }
-// 倒數要對準哪一場。自己在設定裡填過的一律優先;沒填就自動判:
-// 看他練過的題是初級還是中級(id 裡的 -b-/-m-),挑那一級還沒到的最近一場。
-// 為什麼要自動:實測 2,137 個使用者只有 131 個(6%)走進設定頁設過日期,
-// 而考前那兩天湧進 267 個人,設日期的只多了 5 個。功能一直都在,只是沒人找得到。
+// 準備級別偏好：設定過優先；未設定則自動猜測，猜不出預設「初級」
+function prefLevel() {
+  return (store.settings && store.settings.prefLevel) || guessLevel(store.q || {}) || '初級';
+}
+// 倒數要對準哪一場。自己在設定裡填過的一律優先;沒填就依目標級別/練過的題自動對準
 function examTarget() {
   const set = store.settings && store.settings.examDate;
   if (set) return { date: set, level: null };
   if (!EXAMINFO) return null;
-  return nextExam(EXAMINFO.exams, today(), guessLevel(store.q || {}));
+  const pref = prefLevel();
+  return nextExam(EXAMINFO.exams, today(), (pref && pref !== '全部') ? pref : null);
 }
 function daysUntilExam() {
   const t = examTarget(); if (!t) return null;
@@ -125,7 +154,128 @@ function save() {
   store.updatedAt = Date.now();
   localStorage.setItem(STORE_KEY, JSON.stringify(store));
   dirty = true;
+  saveLocalDisk();
   schedulePush();
+}
+
+// 本機硬碟自動備份 (server.mjs /local-progress)，即使清除瀏覽器快取或強制重整也不會丟失每日紀錄與題庫進度
+function isLocalServer() {
+  return typeof window !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+}
+
+async function saveLocalDisk() {
+  if (!isLocalServer()) return;
+  try {
+    await fetch('/local-progress', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(store),
+      keepalive: true,
+    });
+  } catch {}
+}
+
+// 智慧深度合併兩份進度：取題數、歷史紀錄與作答次數較高者，避免跨日或雲端舊檔把今天的每日進度洗掉
+function mergeStores(target, incoming) {
+  if (!incoming || !incoming.q) return target;
+  const out = structuredClone(target);
+  out.q ||= {};
+  out.cards ||= {};
+  out.history ||= {};
+  out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
+  if ((incoming.updatedAt || 0) > (out.updatedAt || 0)) {
+    out.settings = { ...(out.settings || {}), ...(incoming.settings || {}) };
+    if (incoming.syncCode) out.syncCode = incoming.syncCode;
+  }
+
+  // 1. 合併每題進度 q
+  for (const [qid, ip] of Object.entries(incoming.q || {})) {
+    const tp = out.q[qid];
+    if (!tp) {
+      out.q[qid] = { ...ip };
+    } else {
+      const useIncoming = (ip.attempts || 0) > (tp.attempts || 0);
+      out.q[qid] = {
+        box: useIncoming ? ip.box : tp.box,
+        attempts: Math.max(tp.attempts || 0, ip.attempts || 0),
+        correct: Math.max(tp.correct || 0, ip.correct || 0),
+        wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
+        note: tp.note || ip.note || '',
+        studentAnswer: tp.studentAnswer || ip.studentAnswer || '',
+        starred: !!(tp.starred || ip.starred),
+        reviewStage: tp.reviewStage || ip.reviewStage,
+        reviewDue: tp.reviewDue || ip.reviewDue,
+        notionSyncedAt: tp.notionSyncedAt || ip.notionSyncedAt,
+      };
+    }
+  }
+
+  // 2. 合併心智卡排程 cards
+  for (const [cid, ic] of Object.entries(incoming.cards || {})) {
+    out.cards[cid] = { ...(ic || {}), ...(out.cards[cid] || {}) };
+  }
+
+  // 3. 合併每日歷史 history (30天趨勢與今日題數來源)
+  for (const [d, ih] of Object.entries(incoming.history || {})) {
+    const th = out.history[d];
+    if (!th) {
+      out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
+    } else {
+      out.history[d] = {
+        a: Math.max(th.a || 0, ih.a || 0),
+        c: Math.max(th.c || 0, ih.c || 0),
+      };
+    }
+  }
+
+  // 4. 確保今日題數 store.daily 與 history[today()] 同步不遺失
+  const t = today();
+  const todayHistA = (out.history[t] && out.history[t].a) || 0;
+  const targetDailyCount = (out.daily && out.daily.date === t) ? out.daily.count : 0;
+  const incomingDailyCount = (incoming.daily && incoming.daily.date === t) ? incoming.daily.count : 0;
+  const maxTodayCount = Math.max(todayHistA, targetDailyCount, incomingDailyCount);
+  if (maxTodayCount > 0) {
+    out.daily = { date: t, count: maxTodayCount };
+    out.history[t] ||= { a: maxTodayCount, c: 0 };
+    if (out.history[t].a < maxTodayCount) out.history[t].a = maxTodayCount;
+  }
+
+  // 5. 合併連續打卡天數 streak
+  const ts = out.streak || { count: 0, lastDate: '' };
+  const is = incoming.streak || { count: 0, lastDate: '' };
+  if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
+    out.streak = { ...is };
+  }
+
+  // 6. 近期作答紀錄 recent
+  if ((!out.recent || !out.recent.length) && incoming.recent && incoming.recent.length) {
+    out.recent = incoming.recent.slice(-50);
+  }
+
+  out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
+  return out;
+}
+
+async function pullLocalDisk() {
+  if (!isLocalServer()) return false;
+  try {
+    const r = await fetch('/local-progress');
+    if (!r.ok) {
+      // 如果硬碟還沒有備份檔，且目前瀏覽器有資料，立刻寫入硬碟建立初始備份
+      if (Object.keys(store.q || {}).length > 0 || (store.daily && store.daily.count > 0)) {
+        await saveLocalDisk();
+      }
+      return false;
+    }
+    const diskStore = await r.json();
+    if (diskStore && diskStore.q) {
+      store = mergeStores(store, diskStore);
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      await saveLocalDisk();
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 // ---- 雲端同步（同步碼，免帳號） ----
@@ -155,16 +305,17 @@ async function pullSync() {
     const r = await fetch(`${SYNC_URL}/sync/${encodeURIComponent(store.syncCode)}`);
     if (!r.ok) return false;
     const remote = await r.json();
-    if (remote && remote.q && (remote.updatedAt || 0) > (store.updatedAt || 0)) {
-      store = remote;
+    if (remote && remote.q) {
+      store = mergeStores(store, remote);
       localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      saveLocalDisk();
       return true;
     }
   } catch {}
   return false;
 }
 function qp(id) {
-  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', starred: false });
+  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', studentAnswer: '', starred: false });
 }
 // 碼空間 40×40×9000 = 1,440 萬(舊版 10×10×90=9,000,估計已撞出上百對共用碼)
 function makeCode() {
@@ -207,13 +358,14 @@ function formatExp(text) {
     .replace(/([。；])\s*(核心記憶點|記憶點)/g, '$1<br>$2')
     .replace(/(^|<br>)\s*(正解\s*[(（][A-DＡ-Ｄ][)）]|[(（][A-DＡ-Ｄ][)）]|核心記憶點|記憶點)/g, '$1<strong>$2</strong>');
 }
-// 教材對應：指到該題所屬科目的學習指引章節 + 開啟官方 PDF
+// 教材對應：指到該題所屬科目的評鑑主題 (L111~L234) 與評鑑內容 (L11101~L23402) + 開啟官方 PDF
 function guideLine(q) {
   const url = DATA.meta && DATA.meta.guides && DATA.meta.guides[q.subject];
-  if (!url && !q.chapter) return '';
-  const ch = q.chapter ? `—『${esc(q.chapter)}』章` : '';
+  if (!url && !q.chapter && !q.syllabusItem) return '';
+  const ch = q.chapter ? `—【${esc(q.chapter)}】` : '';
+  const item = q.syllabusItem ? `▸『${esc(q.syllabusItem)}』` : '';
   const link = url ? ` <a href="${esc(url)}" target="_blank" rel="noopener">開啟學習指引 ↗</a>` : '';
-  return `<p class="guide">教材對應：${esc(q.subject)} ${ch}${link}</p>`;
+  return `<p class="guide">評鑑範圍對應：${esc(q.subject)} ${ch}${item}${link}</p>`;
 }
 // 回報這題：開 GitHub issue form,自動帶入題號與科目
 function reportLink(q) {
@@ -221,9 +373,12 @@ function reportLink(q) {
     + `&qid=${encodeURIComponent(q.id)}&subject=${encodeURIComponent(q.subject)}`;
   return `<p class="report-line"><a href="${url}" target="_blank" rel="noopener">這題有誤？回報給作者</a></p>`;
 }
-// 今日挑戰：用日期當種子，固定挑 3 題（每天不同、當天穩定）
+// 今日挑戰：用日期當種子，固定挑 3 題（每天不同、當天穩定，優先對齊目標級別）
 function dailyChallenge() {
-  const qs = DATA.questions; if (!qs.length) return [];
+  const lv = prefLevel();
+  const pool = (lv === '初級' || lv === '中級') ? DATA.questions.filter((q) => q.level === lv) : DATA.questions;
+  const qs = pool.length ? pool : DATA.questions;
+  if (!qs.length) return [];
   let seed = 0; for (const ch of today()) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
   const picks = [];
   for (let n = 0; n < 3 && n < qs.length; n++) {
@@ -234,12 +389,17 @@ function dailyChallenge() {
   }
   return picks.map((i) => qs[i]);
 }
-// 今日觀念卡：優先挑「你還沒掌握的章節」(錯題 + 練過未掌握)，逐日輪過；沒練過則全站輪播
+// 今日觀念卡：優先挑目標級別中「你還沒掌握的章節」(錯題 + 練過未掌握)，逐日輪過；沒練過則全站輪播
 function todayConcept() {
   if (!CONCEPTS.length) return null;
   const dayNum = Math.floor(new Date(today() + 'T00:00:00').getTime() / 86400000);
+  const lv = prefLevel();
+  const basePool = (lv === '初級' || lv === '中級') ? CONCEPTS.filter((c) => c.level === lv) : CONCEPTS;
+  const conceptList = basePool.length ? basePool : CONCEPTS;
+
   const byCh = {};
   for (const q of DATA.questions) {
+    if (lv !== '全部' && q.level !== lv) continue;
     const p = store.q[q.id]; if (!p) continue;
     const c = (byCh[q.chapter || q.subject] ||= { attempted: 0, mastered: 0, wrongNow: 0 });
     if (p.attempts > 0) c.attempted++;
@@ -252,10 +412,10 @@ function todayConcept() {
     .sort((a, b) => b.score - a.score);
   if (weak.length) {
     const chosen = weak[dayNum % weak.length].ch;
-    const pool = CONCEPTS.filter((c) => c.chapter === chosen);
+    const pool = conceptList.filter((c) => c.chapter === chosen);
     if (pool.length) return { ...pool[dayNum % pool.length], weak: true };
   }
-  return CONCEPTS[((dayNum % CONCEPTS.length) + CONCEPTS.length) % CONCEPTS.length];
+  return conceptList[((dayNum % conceptList.length) + conceptList.length) % conceptList.length];
 }
 function shuffle(arr) {
   const a = arr.slice();
@@ -270,6 +430,64 @@ function download(name, text, type = 'text/plain') {
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// ---- Notion 同步與 Active Recall ----
+function extractNotionDbId(raw) {
+  if (!raw) return '';
+  const s = raw.trim().split('?')[0].split('#')[0];
+  const m = s.match(/([0-9a-fA-F]{32})/) || s.match(/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/);
+  if (m) return m[1].replace(/-/g, '').toLowerCase();
+  return s.replace(/-/g, '').toLowerCase();
+}
+
+function getNotionConfig() {
+  const token = (store.settings?.notionToken || '').trim();
+  const rawDb = (store.settings?.notionDbId || '').trim();
+  const dbId = extractNotionDbId(rawDb);
+  const isLocal = typeof window !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+  const defaultProxy = isLocal ? '/notion' : (SYNC_URL ? `${SYNC_URL}/notion` : '/notion');
+  const proxy = (store.settings?.notionProxy || '').trim() || defaultProxy;
+  return { token, dbId, proxy };
+}
+
+async function callNotion(endpoint, { method = 'GET', body = null } = {}) {
+  const { token, proxy } = getNotionConfig();
+  if (!token) throw new Error('尚未設定 Notion Token');
+  const url = `${proxy.replace(/\/+$/, '')}/${endpoint.replace(/^\/+/, '')}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Notion-Version': '2022-06-28',
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+let cachedDbSchema = null;
+async function fetchDbSchema() {
+  if (cachedDbSchema) return cachedDbSchema;
+  const { dbId } = getNotionConfig();
+  if (!dbId) throw new Error('尚未設定 Database ID');
+  const db = await callNotion(`databases/${dbId}`);
+  cachedDbSchema = db;
+  return db;
+}
+
+async function syncQuestionToNotion(q, p = {}) {
+  const { dbId } = getNotionConfig();
+  if (!dbId) throw new Error('尚未設定 Database ID');
+  const schema = await fetchDbSchema().catch(() => null);
+  const payload = buildNotionPagePayload(q, p, dbId, schema);
+  const result = await callNotion('pages', { method: 'POST', body: payload });
+  return result;
 }
 
 // ---- views ----
@@ -287,7 +505,7 @@ function rangeGroups() {
     const g = m.get(k) || { key: k, level: q.level, count: 0 };
     g.count++; m.set(k, g);
   }
-  return [...m.values()];
+  return [...m.values()].sort((a, b) => a.key.localeCompare(b.key, 'zh-Hant'));
 }
 
 function home() {
@@ -296,8 +514,8 @@ function home() {
   const byLevel = {};
   groups.forEach((g) => (byLevel[g.level] ||= []).push(g));
   const ranges = Object.entries(byLevel).map(([lv, gs]) =>
-    `<div class="range-group"><div class="range-lv">${esc(lv)}</div>${gs.map((g) =>
-      `<label class="range-item"><input type="checkbox" class="rng" value="${esc(g.key)}" checked><span>${esc(g.key)}</span><b>${g.count}</b></label>`).join('')}</div>`).join('');
+    `<div class="range-group" data-level="${esc(lv)}"><div class="range-lv">${esc(lv)}</div>${gs.map((g) =>
+      `<label class="range-item"><input type="checkbox" class="rng" data-level="${esc(lv)}" value="${esc(g.key)}" checked><span>${esc(g.key)}</span><b>${g.count}</b></label>`).join('')}</div>`).join('');
   const g = dailyGoal(), dc = todayCount(), strk = liveStreak(), du = daysUntilExam();
   const et = examTarget();
   const goalHit = dc >= g;
@@ -319,11 +537,12 @@ function home() {
       <button id="share">分享進度</button>
     </section>`;
   const chDone = store.challengeDone === today();
+  const currLv = prefLevel();
   const challengeCard = `
     <section class="card">
       <div class="row"><h3 style="margin:0">今日挑戰 ${chDone ? '✓ 已完成' : '3 題'}</h3>
         <button class="primary" id="challenge" style="margin:0;padding:8px 14px">${chDone ? '再做一次' : '開始'}</button></div>
-      <p class="muted" style="margin:6px 0 0">每天 3 題，養成每日刷題的習慣。</p>
+      <p class="muted" style="margin:6px 0 0">每天 3 題（${currLv === '全部' ? '初級+中級' : currLv}），養成每日刷題的習慣。</p>
     </section>`;
   const cc = todayConcept();
   const conceptCard = cc ? `
@@ -332,10 +551,63 @@ function home() {
       <h3>${esc(cc.title)}</h3>
       <p>${esc(cc.body)}</p>
     </section>` : '';
-  view.innerHTML = `${dailyStrip}${challengeCard}${conceptCard}
+
+  const dueQs = getDueQuestions();
+  const dueCs = getDueCards();
+  const reviewBanner = (dueQs.length > 0 || dueCs.length > 0) ? `
+    <section class="card review-card">
+      <div class="row">
+        <div>
+          <h3 style="margin:0">⏳ 艾賓浩斯遺忘曲線 · 今日待複習</h3>
+          <p class="muted" style="margin:4px 0 0">
+            ${dueQs.length ? `有 <b>${dueQs.length}</b> 題題目到期待複習` : ''}${dueQs.length && dueCs.length ? '，' : ''}${dueCs.length ? `<b>${dueCs.length}</b> 張心智卡待複習` : ''}！趁遺忘前鞏固記憶。
+          </p>
+        </div>
+        ${dueQs.length ? `<button class="primary" id="start-ebbinghaus" style="margin:0;padding:8px 14px;white-space:nowrap">立即複習題目 (${dueQs.length})</button>` : ''}
+      </div>
+    </section>` : '';
+
+  const bCount = DATA.questions.filter((q) => q.level === '初級').length;
+  const mCount = DATA.questions.filter((q) => q.level === '中級').length;
+  const totalCount = DATA.questions.length;
+
+  const mockSess = store.mockSession;
+  const mockSessBanner = (mockSess && mockSess.poolIds && mockSess.poolIds.length) ? `
+    <section class="card" style="background:#eff6ff;border:1px solid #bfdbfe">
+      <div class="row">
+        <div>
+          <h3 style="margin:0;color:#1e40af">📌 上次做到一半的模擬考</h3>
+          <p class="muted" style="margin:4px 0 0;color:#2563eb">
+            ${esc(mockSess.paperName)}（已答 ${(mockSess.answers || []).filter(a => a !== null).length} / ${mockSess.poolIds.length} 題，剩餘約 ${Math.max(1, Math.round(mockSess.remaining / 60))} 分鐘）
+          </p>
+        </div>
+        <button class="primary" id="home-resume-mock" style="margin:0;padding:8px 14px;white-space:nowrap">繼續作答</button>
+      </div>
+    </section>
+  ` : '';
+  
+  const featureUpgradeBanner = `
+    <section class="card" style="background:linear-gradient(135deg,#eff6ff 0%,#f0fdf4 100%);border:1px solid #bfdbfe;border-radius:12px;padding:14px 16px;margin-bottom:12px">
+      <div style="font-weight:700;color:#1e40af;font-size:15px;margin-bottom:6px;display:flex;align-items:center;gap:6px">
+        <span>✨ 全新改版已生效：標準化四段詳解 ＆ 做到一半就好</span>
+      </div>
+      <div style="margin:0;font-size:13px;color:#334155;line-height:1.7">
+        <div>📌 <b>1. 四段標準化題庫</b>：作答後即時展示<b>【題目】｜【答案】｜【📝 考生思路輸入】｜【🤖 AI 檢查逐項分析】</b>（初級 919 題已全數補齊！）。</div>
+        <div>⏱️ <b>2. 做到一半就好</b>：
+          模擬考新增<b>「半份試卷（25 題）」</b>；作答中隨時可<b>「提前交卷」</b>或<b>「暫存離開」</b>；練習模式隨時可<b>「提早結束」</b>看弱點！
+        </div>
+      </div>
+    </section>
+  `;
+  view.innerHTML = `${dailyStrip}${featureUpgradeBanner}${mockSessBanner}${reviewBanner}${challengeCard}${conceptCard}
     <section class="card">
       <h2>練習模式</h2>
-      <p class="muted">即時看答案與解析。勾選要練的範圍，預設全選。</p>
+      <p class="muted">即時看答案與解析。切換級別並勾選要練的範圍，預設全選。</p>
+      <div class="level-tabs" id="pr-level-tabs">
+        <button class="level-tab ${currLv === '初級' ? 'on' : ''}" data-lv="初級">初級（${bCount} 題）</button>
+        <button class="level-tab ${currLv === '中級' ? 'on' : ''}" data-lv="中級">中級（${mCount} 題）</button>
+        <button class="level-tab ${currLv === '全部' ? 'on' : ''}" data-lv="全部">全部（${totalCount} 題）</button>
+      </div>
       <div class="row range-head"><span class="muted" id="range-sum"></span>
         <span><button id="sel-all">全選</button><button id="sel-none">清除</button></span></div>
       <div id="ranges">${ranges}</div>
@@ -345,11 +617,12 @@ function home() {
       <label>出題方式
         <select id="pr-mode">
           <option value="smart">智慧複習（優先錯題與沒做過的）</option>
+          <option value="ebbinghaus">遺忘曲線複習（只練已排程且到期的題目）</option>
           <option value="random">隨機</option>
         </select>
       </label>
       <label>題數
-        <select id="pr-count"><option value="10">10</option><option value="20">20</option><option value="0">全部（選取範圍）</option></select>
+        <select id="pr-count"><option value="10">10 題</option><option value="25">25 題（半份範圍，做到一半就好）</option><option value="20">20 題</option><option value="5">5 題（快速熱身）</option><option value="0">全部（選取範圍）</option></select>
       </label>
       <label>來源
         <select id="pr-source">
@@ -361,6 +634,8 @@ function home() {
       <button class="primary" id="pr-start">開始練習</button>
       <button class="primary alt" id="pr-images">只練看圖題（${DATA.questions.filter((q) => q.image).length} 題,全中級）</button>
     </section>`;
+
+  let activeLevel = currLv;
   const selectedKeys = () => new Set([...view.querySelectorAll('.rng:checked')].map((c) => c.value));
   const kw = () => $('#pr-kw').value.trim().toLowerCase();
   const matchKw = (q) => {
@@ -371,17 +646,76 @@ function home() {
   const pickPool = () => {
     const keys = selectedKeys();
     const src = $('#pr-source') ? $('#pr-source').value : '';
-    return DATA.questions.filter((q) => keys.has(rangeKey(q)) && matchKw(q) && (!src || srcOf(q) === src));
+    const mode = $('#pr-mode') ? $('#pr-mode').value : 'smart';
+    const now = Date.now();
+    return DATA.questions.filter((q) => {
+      if (mode === 'ebbinghaus') {
+        const p = store.q[q.id];
+        if (!p || !p.reviewDue || p.reviewDue > now) return false;
+      }
+      return (activeLevel === '全部' || q.level === activeLevel) &&
+        keys.has(rangeKey(q)) &&
+        matchKw(q) &&
+        (!src || srcOf(q) === src);
+    });
   };
   const updateSum = () => {
-    const keys = selectedKeys();
-    $('#range-sum').textContent = `已選 ${keys.size} 範圍，共 ${pickPool().length} 題`;
+    const pool = pickPool();
+    const tag = activeLevel === '全部' ? '全部' : activeLevel;
+    const mode = $('#pr-mode') ? $('#pr-mode').value : '';
+    const modeDesc = mode === 'ebbinghaus' ? '［遺忘曲線到期題］' : '';
+    $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（${tag}${modeDesc}）`;
   };
+  const setLevelTab = (lv) => {
+    activeLevel = lv;
+    store.settings ||= { dailyGoal: 20, examDate: '' };
+    store.settings.prefLevel = lv;
+    save();
+    view.querySelectorAll('#pr-level-tabs .level-tab').forEach((b) => b.classList.toggle('on', b.dataset.lv === lv));
+    view.querySelectorAll('.range-group').forEach((g) => {
+      const match = lv === '全部' || g.dataset.level === lv;
+      g.style.display = match ? '' : 'none';
+      if (match) {
+        const boxes = g.querySelectorAll('.rng');
+        if (![...boxes].some((b) => b.checked)) boxes.forEach((b) => (b.checked = true));
+      }
+    });
+    if ($('#pr-images')) {
+      $('#pr-images').style.display = (lv === '初級') ? 'none' : '';
+    }
+    updateSum();
+  };
+
+  view.querySelectorAll('#pr-level-tabs .level-tab').forEach((b) => {
+    b.onclick = () => setLevelTab(b.dataset.lv);
+  });
   view.querySelectorAll('.rng').forEach((c) => (c.onchange = updateSum));
   $('#pr-kw').oninput = updateSum;
   $('#pr-source').onchange = updateSum;
-  $('#sel-all').onclick = () => { view.querySelectorAll('.rng').forEach((c) => (c.checked = true)); updateSum(); };
-  $('#sel-none').onclick = () => { view.querySelectorAll('.rng').forEach((c) => (c.checked = false)); updateSum(); };
+  $('#pr-mode').onchange = updateSum;
+  $('#sel-all').onclick = () => {
+    view.querySelectorAll('.range-group').forEach((g) => {
+      if (activeLevel === '全部' || g.dataset.level === activeLevel) {
+        g.querySelectorAll('.rng').forEach((c) => (c.checked = true));
+      }
+    });
+    updateSum();
+  };
+  $('#sel-none').onclick = () => {
+    view.querySelectorAll('.range-group').forEach((g) => {
+      if (activeLevel === '全部' || g.dataset.level === activeLevel) {
+        g.querySelectorAll('.rng').forEach((c) => (c.checked = false));
+      }
+    });
+    updateSum();
+  };
+  setLevelTab(activeLevel);
+
+  if ($('#start-ebbinghaus')) {
+    $('#start-ebbinghaus').onclick = () => runPractice(shuffle(dueQs));
+  }
+
+  if ($('#home-resume-mock')) $('#home-resume-mock').onclick = mockSetup;
   $('#pr-start').onclick = () => {
     const count = +$('#pr-count').value;
     let pool = pickPool();
@@ -432,17 +766,42 @@ function runPractice(pool, opts = {}) {
   const render = () => {
     const q = pool[i];
     const p = qp(q.id);
+    const reviewStatus = formatReviewDue(p.reviewDue);
+    const reviewBtnText = p.reviewDue
+      ? (reviewStatus?.isDue ? '⏳ 今日待複習' : `⏳ ${reviewStatus?.label || '已排複習'}`)
+      : '＋ 加入複習曲線';
+    const reviewBtnClass = p.reviewDue
+      ? (reviewStatus?.isDue ? 'review-toggle-btn due' : 'review-toggle-btn on')
+      : 'review-toggle-btn';
+
     view.innerHTML = `
       <section class="card">
-        <div class="row"><span class="muted">${i + 1} / ${pool.length}</span>
-          <button class="star ${p.starred ? 'on' : ''}" id="star">${p.starred ? '★ 已標' : '☆ 標記'}</button></div>
-        <p class="qmeta muted">${esc(q.subject)}${q.topic ? '・' + esc(q.topic) : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>
+        <div class="row">
+          <span class="muted">${i + 1} / ${pool.length}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="${reviewBtnClass}" id="review-btn" title="基於艾賓浩斯遺忘曲線排程複習">${reviewBtnText}</button>
+            <button class="star ${p.starred ? 'on' : ''}" id="star">${p.starred ? '★ 已標' : '☆ 標記'}</button>
+          </div>
+        </div>
+        <p class="qmeta muted">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>
         <h3>${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
         <div id="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
         <div id="fb"></div>
       </section>`;
     $('#star').onclick = () => { p.starred = !p.starred; save(); render(); };
+    $('#review-btn').onclick = () => {
+      if (p.reviewDue) {
+        delete p.reviewDue;
+        delete p.reviewStage;
+      } else {
+        const next = calcNextReview(0, true);
+        p.reviewStage = next.stage;
+        p.reviewDue = next.due;
+      }
+      save();
+      render();
+    };
     view.querySelectorAll('.opt').forEach((btn) =>
       (btn.onclick = () => answer(q, +btn.dataset.k)));
   };
@@ -452,6 +811,17 @@ function runPractice(pool, opts = {}) {
     p.attempts++;
     if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
     p.box = nextBox(p.box, correct);
+
+    let reviewUpdateMsg = '';
+    if (p.reviewDue) {
+      const next = calcNextReview(p.reviewStage || 1, correct);
+      p.reviewStage = next.stage;
+      p.reviewDue = next.due;
+      reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
+        🧠 遺忘曲線進度：第 ${next.stage} 階段（${next.days} 天後再次複習）
+      </span>`;
+    }
+
     logRecent(correct);
     bumpDaily(correct);
     save();
@@ -460,60 +830,413 @@ function runPractice(pool, opts = {}) {
       if (idx === q.answer) b.classList.add('correct');
       if (idx === k && !correct) b.classList.add('wrong');
     });
+
+    // 若有對應的考點心智卡，提供一鍵跳轉查看原理
+    const relatedCards = (GUIDE_DATA.cards || []).filter((c) => {
+      if (q.syllabusItem && c.syllabusItem === q.syllabusItem) return true;
+      const text = `${q.question} ${q.options.join(' ')} ${q.topic || ''}`.toLowerCase();
+      return (c.keywords || []).some((kw) => text.includes(kw.toLowerCase()));
+    });
+    const cardShortcut = relatedCards.length
+      ? `<button class="guide-copy-btn" id="jump-guide-card" style="margin-top:6px">📖 查看此題考點心智卡：${esc(relatedCards[0].title.split('(')[0].trim())}</button>`
+      : '';
+
     $('#fb').innerHTML = `
       <p class="${correct ? 'ok' : 'bad'}">${correct ? '答對' : '答錯'}（正解：${esc(q.options[q.answer])}）</p>
+      ${reviewUpdateMsg ? `<div>${reviewUpdateMsg}</div>` : ''}
       ${q.explanation ? `<p class="exp">${formatExp(q.explanation)}</p>` : ''}
       ${guideLine(q)}
+      ${cardShortcut ? `<div>${cardShortcut}</div>` : ''}
       ${reportLink(q)}
+      <div class="notion-row">
+        <button class="notion-btn" id="notion-sync-btn">${p.notionSyncedAt ? '✓ 已在 Notion' : '📌 存入 Notion'}</button>
+        <button class="notion-btn alt" id="notion-copy-btn">📋 複製 Notion 摺疊格式</button>
+        <span id="notion-single-msg" class="muted" style="font-size:12px"></span>
+      </div>
       <label class="note">筆記<textarea id="note" rows="2" placeholder="寫下你的理解或記憶點…">${esc(p.note || '')}</textarea></label>
-      <button class="primary" id="next">${i + 1 < pool.length ? '下一題' : '完成'}</button>`;
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <button class="primary" id="next" style="margin:0">${i + 1 < pool.length ? '下一題' : '完成'}</button>
+        ${i + 1 < pool.length ? `<button id="early-finish" style="margin:0;background:#f8fafc;border:1px solid #cbd5e1;color:#475569">提早結束本次練習（已做 ${i + 1} 題）</button>` : ''}
+      </div>`;
+    if ($('#jump-guide-card')) {
+      $('#jump-guide-card').onclick = () => {
+        guideActiveCat = '全部';
+        guideSearchKw = relatedCards[0].title.split(' ')[0];
+        guide();
+      };
+    }
+    if ($('#notion-sync-btn')) $('#notion-sync-btn').onclick = async () => {
+      const btn = $('#notion-sync-btn');
+      const msg = $('#notion-single-msg');
+      const { token, dbId } = getNotionConfig();
+      if (!token || !dbId) {
+        msg.textContent = '請先在「設定」填入 Notion Token 與 Database ID';
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = '同步中…';
+      try {
+        await syncQuestionToNotion(q, p);
+        p.notionSyncedAt = Date.now();
+        save();
+        btn.textContent = '✓ 已存入 Notion';
+        msg.textContent = '已成功同步至 Notion 資料庫！';
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '📌 存入 Notion';
+        msg.textContent = `失敗：${err.message}`;
+      }
+    };
+    if ($('#notion-copy-btn')) $('#notion-copy-btn').onclick = async () => {
+      const text = toNotionMarkdown([q], { [q.id]: p });
+      try {
+        await navigator.clipboard.writeText(text);
+        $('#notion-single-msg').textContent = '✓ 已複製 Notion Toggle 格式，可直接貼入 Notion！';
+      } catch {
+        $('#notion-single-msg').textContent = '複製失敗';
+      }
+    };
+    if ($('#student-answer')) $('#student-answer').oninput = (e) => { p.studentAnswer = e.target.value; save(); };
     $('#note').oninput = (e) => { p.note = e.target.value; save(); };
+    if ($('#early-finish')) $('#early-finish').onclick = () => finish();
     $('#next').onclick = () => { i++; i < pool.length ? render() : finish(); };
   };
   const finish = () => {
     pushSync(); // checkpoint:練習完成立即上傳
     const total = right + wrong;
     const pct = total ? Math.round((right / total) * 1000) / 10 : 0;
+
+    // 進步的第一性原理是補不會：統計本次錯題落在哪些官方評鑑範圍
+    const wrongByItem = {};
+    for (const wq of sessionWrong) {
+      const key = wq.syllabusItem || wq.chapter || wq.subject;
+      (wrongByItem[key] ||= { chapter: wq.chapter, item: key, qs: [] }).qs.push(wq);
+    }
+    const weakDiagnosticHtml = Object.values(wrongByItem).length ? `
+      <div style="margin:14px 0;padding:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px">
+        <h3 style="margin:0 0 6px;color:#b91c1c;font-size:15px">🎯 進步的第一性原理是「補不會」：本次待補強評鑑範圍</h3>
+        <p class="muted" style="margin:0 0 8px;font-size:13px">別無腦刷題！以下是你剛才答錯所對應的官方評鑑內容，點擊可直接針對該範圍全部題目特訓：</p>
+        ${Object.values(wrongByItem).map((g) => {
+          const allInScope = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === g.item);
+          return `<div class="row" style="padding:6px 0;border-top:1px dashed #fca5a5">
+            <span style="font-size:14px"><b>${esc(g.item)}</b> <span class="muted">（本次錯 ${g.qs.length} 題）</span></span>
+            <button class="goto drill-scope-btn" data-scope="${esc(g.item)}" style="background:#fee2e2;color:#b91c1c;font-weight:600">特訓此範圍 (${allInScope.length} 題)</button>
+          </div>`;
+        }).join('')}
+      </div>
+    ` : '';
+
     view.innerHTML = `
       <section class="card">
         <h2>練習完成</h2>
         <p class="score">${pct}％</p>
         <p>這組 ${total} 題,答對 ${right}、答錯 ${wrong}</p>
+        ${weakDiagnosticHtml}
         ${sessionWrong.length ? '<button class="primary" id="redo-wrong">只練這次錯的</button>' : '<p class="muted">這組全對,讚!</p>'}
         <button id="again">再練一次</button>
         <button id="back">回首頁</button>
       </section>`;
     if (sessionWrong.length) $('#redo-wrong').onclick = () => runPractice(sessionWrong.slice());
+    view.querySelectorAll('.drill-scope-btn').forEach((btn) => {
+      btn.onclick = () => {
+        const sc = btn.dataset.scope;
+        const scopePool = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === sc);
+        runPractice(shuffle(scopePool));
+      };
+    });
     $('#again').onclick = () => runPractice(shuffle(pool.slice()));
     $('#back').onclick = home;
   };
   render();
 }
 
+let guideActiveCat = '全部';
+let guideSearchKw = '';
+
+function guide() {
+  setNav('guide');
+  const cats = GUIDE_DATA.categories && GUIDE_DATA.categories.length
+    ? GUIDE_DATA.categories
+    : ['全部', '數值預測任務', '分類判斷任務', '非監督學習', '模型評估與陷阱', '資料處理與特徵工程'];
+  const allCards = GUIDE_DATA.cards || [];
+
+  const render = () => {
+    const kw = guideSearchKw.trim().toLowerCase();
+    const filtered = allCards.filter((c) => {
+      if (guideActiveCat !== '全部' && c.category !== guideActiveCat) return false;
+      if (!kw) return true;
+      const haystack = `${c.title} ${c.subtitle || ''} ${c.chapter || ''} ${c.syllabusItem || ''} ${c.function} ${c.scenario} ${c.trap} ${(c.keywords || []).join(' ')}`.toLowerCase();
+      return haystack.includes(kw);
+    });
+
+    const catTabs = cats.map((cat) => `
+      <button class="guide-cat-tab ${guideActiveCat === cat ? 'on' : ''}" data-cat="${esc(cat)}">
+        ${esc(cat)} ${cat === '全部' ? `(${allCards.length})` : `(${allCards.filter((x) => x.category === cat).length})`}
+      </button>
+    `).join('');
+
+    const dueCardsList = getDueCards();
+    const dueBannerHtml = dueCardsList.length ? `
+      <div class="card review-card" style="margin-bottom:12px">
+        <div class="row">
+          <div>
+            <h3 style="margin:0">⏳ 艾賓浩斯心智卡待複習（${dueCardsList.length} 張）</h3>
+            <p class="muted" style="margin:4px 0 0">以下有心智卡排程複習時間已到，點擊卡片旁的「實戰測驗」直接驗收！</p>
+          </div>
+        </div>
+      </div>
+    ` : '';
+
+    const cardsHtml = filtered.map((card) => {
+      // 找出初級科目1匹配的真題數量
+      const matchedQs = DATA.questions.filter((q) => {
+        if (q.level !== '初級') return false;
+        const text = `${q.question} ${q.options.join(' ')} ${q.explanation || ''} ${q.topic || ''}`.toLowerCase();
+        return (card.keywords || []).some((k) => text.includes(k.toLowerCase()));
+      });
+      const qCount = matchedQs.length;
+
+      const cs = store.cards?.[card.id];
+      const rStatus = cs ? formatReviewDue(cs.reviewDue) : null;
+      const reviewBtnText = cs?.reviewDue
+        ? (rStatus?.isDue ? '⏳ 今日待複習' : `⏳ ${rStatus?.label || '已排複習'}`)
+        : '＋ 加入複習曲線';
+      const reviewBtnClass = cs?.reviewDue
+        ? (rStatus?.isDue ? 'review-toggle-btn due card-review-btn' : 'review-toggle-btn on card-review-btn')
+        : 'review-toggle-btn card-review-btn';
+
+      return `
+        <div class="guide-card" data-cid="${esc(card.id)}">
+          <div class="guide-card-top">
+            <div>
+              <h3 class="guide-card-title">${esc(card.title)}</h3>
+              ${card.syllabusItem ? `<div style="font-size:12px;color:var(--c-accent);font-weight:600;margin-top:2px">📍 評鑑範圍：${esc(card.chapter || '')} ▸ ${esc(card.syllabusItem)}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              <span class="guide-card-cat">${esc(card.category)}</span>
+              <button class="${reviewBtnClass}" data-cid="${esc(card.id)}" title="加入艾賓浩斯間隔複習">${reviewBtnText}</button>
+            </div>
+          </div>
+          ${card.subtitle ? `<div class="guide-card-sub">${esc(card.subtitle)}</div>` : ''}
+          <div class="guide-card-body">
+            <div class="guide-item fun"><b>🔹 核心功能</b> ${esc(card.function)}</div>
+            <div class="guide-item sce"><b>🔸 考題情境</b> ${esc(card.scenario)}</div>
+            <div class="guide-item trp"><b>⚠️ 陷阱提醒</b> ${esc(card.trap)}</div>
+          </div>
+          <div class="guide-card-footer">
+            <button class="guide-quiz-btn" data-cid="${esc(card.id)}">
+              🎯 實戰測驗此觀念 ${qCount ? `(${qCount} 題)` : ''}
+            </button>
+            <div>
+              <button class="guide-copy-btn" data-cid="${esc(card.id)}">📋 複製心智卡</button>
+              <span class="muted card-sync-msg-${esc(card.id)}" style="font-size:12px;margin-left:6px"></span>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    view.innerHTML = `
+      <section class="card guide-header">
+        <h2>初級考科一：人工智慧基礎概論 · 考點速查心智卡</h2>
+        <p class="muted" style="margin:4px 0 10px;font-size:14px">
+          專治「看懂名詞卻不知用來做什麼、情境題選不出來」！每張卡片皆可一鍵直通歷屆真題測驗，驗收 Active Recall 主動回憶。
+        </p>
+        <label style="margin:0 0 8px">
+          <input id="guide-kw-in" placeholder="搜尋專有名詞、演算法或指標，例如：迴歸、AUC、過擬合、混淆矩陣..." value="${esc(guideSearchKw)}">
+        </label>
+        <div class="guide-tabs">${catTabs}</div>
+      </section>
+      ${dueBannerHtml}
+      <div id="guide-list">${cardsHtml || '<section class="card"><p class="muted">沒有符合搜尋條件的考點心智卡。</p></section>'}</div>
+    `;
+
+    // 綁定搜尋輸入
+    const kwInput = $('#guide-kw-in');
+    if (kwInput) {
+      kwInput.oninput = (e) => {
+        guideSearchKw = e.target.value;
+        render();
+        const el = $('#guide-kw-in');
+        if (el) {
+          el.focus();
+          el.setSelectionRange(el.value.length, el.value.length);
+        }
+      };
+    }
+
+    // 綁定類別切換
+    view.querySelectorAll('.guide-cat-tab').forEach((btn) => {
+      btn.onclick = () => {
+        guideActiveCat = btn.dataset.cat;
+        render();
+      };
+    });
+
+    // 綁定複習排程切換按鈕
+    view.querySelectorAll('.card-review-btn').forEach((btn) => {
+      btn.onclick = () => {
+        const cid = btn.dataset.cid;
+        store.cards ||= {};
+        const cs = store.cards[cid] ||= {};
+        if (cs.reviewDue) {
+          delete cs.reviewDue;
+          delete cs.reviewStage;
+        } else {
+          const next = calcNextReview(0, true);
+          cs.reviewStage = next.stage;
+          cs.reviewDue = next.due;
+        }
+        save();
+        render();
+      };
+    });
+
+    // 綁定實戰測驗按鈕
+    view.querySelectorAll('.guide-quiz-btn').forEach((btn) => {
+      btn.onclick = () => {
+        const cid = btn.dataset.cid;
+        const card = allCards.find((c) => c.id === cid);
+        if (!card) return;
+        const matchedQs = DATA.questions.filter((q) => {
+          if (q.level !== '初級') return false;
+          const text = `${q.question} ${q.options.join(' ')} ${q.explanation || ''} ${q.topic || ''}`.toLowerCase();
+          return (card.keywords || []).some((k) => text.includes(k.toLowerCase()));
+        });
+        if (matchedQs.length) {
+          runPractice(shuffle(matchedQs));
+        } else {
+          alert('目前題庫中暫無完全匹配此關鍵字的初級題目');
+        }
+      };
+    });
+
+    // 綁定複製 Notion Markdown
+    view.querySelectorAll('.guide-copy-btn').forEach((btn) => {
+      btn.onclick = async () => {
+        const cid = btn.dataset.cid;
+        const card = allCards.find((c) => c.id === cid);
+        if (!card) return;
+        const mdText = cardToNotionMarkdown(card);
+        const msgEl = view.querySelector(`.card-sync-msg-${cid}`);
+        try {
+          await navigator.clipboard.writeText(mdText);
+          if (msgEl) msgEl.textContent = '✓ 已複製！可直接貼上 Notion';
+        } catch {
+          if (msgEl) msgEl.textContent = '複製失敗';
+        }
+      };
+    });
+  };
+
+  render();
+}
+
 function mockSetup() {
   setNav('mock');
-  const opts = papers().map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  const allPapers = papers();
+  const bPapers = allPapers.filter((p) => p.startsWith('初級'));
+  const mPapers = allPapers.filter((p) => p.startsWith('中級'));
+  let mockLv = prefLevel();
+  if (mockLv !== '初級' && mockLv !== '中級') mockLv = '初級';
+
   const lim = DATA.meta.defaultTimeLimitMin || 60;
+  const sess = store.mockSession;
+  const answeredInSess = sess ? (sess.answers || []).filter((a) => a !== null).length : 0;
+  const resumeBanner = (sess && sess.poolIds && sess.poolIds.length) ? `
+    <div style="margin-bottom:14px;padding:12px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px">
+      <div style="font-weight:700;color:#1e40af;margin-bottom:4px;display:flex;align-items:center;gap:6px">
+        <span>📌 偵測到上次做到一半的模擬考</span>
+      </div>
+      <div style="font-size:13px;color:#2563eb;margin-bottom:8px">
+        試卷：<b>${esc(sess.paperName)}</b>（已作答 ${answeredInSess} / ${sess.poolIds.length} 題，剩餘約 ${Math.max(1, Math.round(sess.remaining / 60))} 分鐘）
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="primary" id="mk-resume" style="margin:0;padding:6px 14px">▶ 繼續作答第 ${sess.i + 1} 題</button>
+        <button id="mk-discard" style="margin:0;padding:6px 14px;background:#fff;border:1px solid #cbd5e1;color:#64748b">放棄並重新開始</button>
+      </div>
+    </div>
+  ` : '';
+
   view.innerHTML = `
     <section class="card">
       <h2>模擬考模式</h2>
-      <p class="muted">整份計時作答，交卷前不顯示答案。練臨場與時間分配。</p>
-      <label>試卷<select id="mk-paper">${opts}</select></label>
-      <label>時間（分鐘）<input id="mk-min" type="number" value="${lim}" min="1"></label>
+      <p class="muted">整份計時作答，交卷前不顯示答案。練臨場與時間分配。支援做到一半隨時暫存離開或提前交卷。</p>
+      ${resumeBanner}
+      <div class="level-tabs" id="mk-level-tabs">
+        <button class="level-tab ${mockLv === '初級' ? 'on' : ''}" data-lv="初級">初級（${bPapers.length} 卷）</button>
+        <button class="level-tab ${mockLv === '中級' ? 'on' : ''}" data-lv="中級">中級（${mPapers.length} 卷）</button>
+        <button class="level-tab ${mockLv === '全部' ? 'on' : ''}" data-lv="全部">全部（${allPapers.length} 卷）</button>
+      </div>
+      <label>試卷<select id="mk-paper"></select></label>
+      <label>試卷題數
+        <select id="mk-count">
+          <option value="25" selected>半份試卷（25 題，做到一半剛剛好，適合短時間）</option>
+          <option value="0">完整試卷（全卷約 50 題，全真模考）</option>
+          <option value="15">快速精練（15 題，短時間衝刺）</option>
+        </select>
+      </label>
+      <label>時間（分鐘）<input id="mk-min" type="number" value="${Math.round(lim / 2)}" min="1"></label>
       <button class="primary" id="mk-start">開始模擬考</button>
     </section>`;
+
+  if ($('#mk-resume')) {
+    $('#mk-resume').onclick = () => {
+      const qMap = new Map(DATA.questions.map((q) => [q.id, q]));
+      const pool = sess.poolIds.map((id) => qMap.get(id)).filter(Boolean);
+      if (pool.length) {
+        runMock(pool, Math.max(1, Math.round(sess.remaining / 60)), sess);
+      } else {
+        delete store.mockSession;
+        save();
+        mockSetup();
+      }
+    };
+  }
+  if ($('#mk-discard')) {
+    $('#mk-discard').onclick = () => {
+      delete store.mockSession;
+      save();
+      mockSetup();
+    };
+  }
+
+  const updatePapers = (lv) => {
+    mockLv = lv;
+    view.querySelectorAll('#mk-level-tabs .level-tab').forEach((b) => b.classList.toggle('on', b.dataset.lv === lv));
+    const list = lv === '初級' ? bPapers : lv === '中級' ? mPapers : allPapers;
+    $('#mk-paper').innerHTML = list.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  };
+  view.querySelectorAll('#mk-level-tabs .level-tab').forEach((b) => {
+    b.onclick = () => updatePapers(b.dataset.lv);
+  });
+  updatePapers(mockLv);
+
+  $('#mk-count').onchange = () => {
+    const c = +$('#mk-count').value;
+    if (c === 25) $('#mk-min').value = Math.max(15, Math.round(lim / 2));
+    else if (c === 15) $('#mk-min').value = Math.max(10, Math.round((lim * 15) / 50));
+    else $('#mk-min').value = lim;
+  };
+
   $('#mk-start').onclick = () => {
     const paper = $('#mk-paper').value;
+    let pool = DATA.questions.filter((q) => `${q.level}｜${q.round}｜${q.subject}` === paper);
+    const count = +$('#mk-count').value || 0;
     const mins = +$('#mk-min').value || lim;
-    const pool = DATA.questions.filter((q) => `${q.level}｜${q.round}｜${q.subject}` === paper);
+    if (count > 0 && count < pool.length) {
+      pool = pool.slice(0, count);
+    }
     runMock(pool, mins);
   };
 }
 
-function runMock(pool, mins) {
-  const answers = new Array(pool.length).fill(null);
-  let i = 0;
-  let remaining = mins * 60;
+function runMock(pool, mins, existingSession = null) {
+  const answers = existingSession?.answers ? [...existingSession.answers] : new Array(pool.length).fill(null);
+  let i = existingSession?.i != null ? Math.min(existingSession.i, pool.length - 1) : 0;
+  let remaining = existingSession?.remaining != null ? existingSession.remaining : mins * 60;
+  const paperName = pool[0] ? `${pool[0].level}｜${pool[0].round}｜${pool[0].subject}` : '模擬考';
+
   const fmt = () => `${String((remaining / 60) | 0).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`;
   const timer = setInterval(() => {
     remaining--;
@@ -522,34 +1245,75 @@ function runMock(pool, mins) {
     if (remaining <= 0) { clearInterval(timer); submit(); }
   }, 1000);
 
+  const saveSession = () => {
+    store.mockSession = {
+      poolIds: pool.map((q) => q.id),
+      answers,
+      remaining,
+      i,
+      paperName,
+      timestamp: Date.now(),
+    };
+    save();
+  };
+
   const render = () => {
     const q = pool[i];
+    const answeredCount = answers.filter((a) => a !== null).length;
     view.innerHTML = `
       <section class="card">
-        <div class="row"><span class="muted">${i + 1} / ${pool.length}</span><span id="timer" class="timer">${fmt()}</span></div>
+        <div class="row">
+          <span class="muted">${i + 1} / ${pool.length}（已作答 ${answeredCount} 題）</span>
+          <span id="timer" class="timer">${fmt()}</span>
+        </div>
         <p class="qmeta muted">${esc(q.subject)}</p>
         <h3>${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
         <div id="opts">${q.options.map((o, k) =>
           `<button class="opt ${answers[i] === k ? 'picked' : ''}" data-k="${k}">${esc(o)}</button>`).join('')}</div>
-        <div class="row">
+        <div class="row" style="margin-top:14px;gap:8px;flex-wrap:wrap">
           <button id="prev" ${i === 0 ? 'disabled' : ''}>上一題</button>
-          ${i + 1 < pool.length ? '<button id="next">下一題</button>' : '<button class="primary" id="submit">交卷</button>'}
+          ${i + 1 < pool.length ? '<button id="next">下一題</button>' : ''}
+          <button class="primary" id="submit" style="margin:0">${answeredCount < pool.length ? '提前交卷' : '交卷'}</button>
+          <button id="pause-mock" style="background:#f1f5f9;color:#475569;margin:0" title="隨時保存作答進度，下次進入模擬考繼續">暫存離開（做到一半下次繼續）</button>
         </div>
       </section>`;
+
     // 點選項只切換 picked class,不整卡重 render(否則 #timer 被重建會閃 --:--)
     view.querySelectorAll('.opt').forEach((b) => (b.onclick = () => {
       answers[i] = +b.dataset.k;
+      saveSession();
       view.querySelectorAll('.opt').forEach((x) => x.classList.toggle('picked', +x.dataset.k === answers[i]));
+      const newAnswered = answers.filter((a) => a !== null).length;
+      if ($('#submit')) $('#submit').textContent = newAnswered < pool.length ? '提前交卷' : '交卷';
     }));
-    if ($('#prev')) $('#prev').onclick = () => { i--; render(); };
-    if ($('#next')) $('#next').onclick = () => { i++; render(); };
-    if ($('#submit')) $('#submit').onclick = submit;
+
+    if ($('#prev')) $('#prev').onclick = () => { i--; saveSession(); render(); };
+    if ($('#next')) $('#next').onclick = () => { i++; saveSession(); render(); };
+    if ($('#submit')) $('#submit').onclick = () => {
+      const ansCount = answers.filter((a) => a !== null).length;
+      if (ansCount < pool.length) {
+        if (!confirm(`目前共 ${pool.length} 題，你已作答 ${ansCount} 題（尚有 ${pool.length - ansCount} 題未作答）。\n確定要現在提前交卷結算成績嗎？`)) {
+          return;
+        }
+      }
+      submit();
+    };
+    if ($('#pause-mock')) {
+      $('#pause-mock').onclick = () => {
+        clearInterval(timer);
+        saveSession();
+        alert(`已暫存目前作答進度（已答 ${answeredCount} / ${pool.length} 題，剩餘 ${Math.max(1, Math.round(remaining / 60))} 分鐘）！\n下次點進「模擬考」隨時可繼續作答。`);
+        home();
+      };
+    }
   };
+
   function submit() {
     clearInterval(timer);
-    // 計入進度（模擬考也更新 Leitner / 統計）
+    // 計入進度（只把實際作答的題目計入 attempts / correct / wrong，未作答不懲罰性破壞 Leitner 箱子）
     pool.forEach((q, idx) => {
+      if (answers[idx] === null) return;
       const p = qp(q.id);
       const correct = answers[idx] === q.answer;
       p.attempts++;
@@ -558,19 +1322,54 @@ function runMock(pool, mins) {
       logRecent(correct);
       bumpDaily(correct);
     });
+    delete store.mockSession;
     save();
     pushSync(); // checkpoint:交卷立即上傳
+
     const r = scoreExam(pool, answers);
+    const attemptedCount = answers.filter((a) => a !== null).length;
+    const attemptedCorrect = pool.filter((q, idx) => answers[idx] === q.answer).length;
+    const attemptedPct = attemptedCount ? Math.round((attemptedCorrect / attemptedCount) * 1000) / 10 : 0;
+
+    const wrongQs = pool.filter((q, idx) => answers[idx] !== null && answers[idx] !== q.answer);
+    const wrongByItem = {};
+    for (const wq of wrongQs) {
+      const key = wq.syllabusItem || wq.chapter || wq.subject;
+      (wrongByItem[key] ||= { item: key, qs: [] }).qs.push(wq);
+    }
+    const mockDiagHtml = Object.values(wrongByItem).length ? `
+      <div style="margin:14px 0;padding:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px">
+        <h3 style="margin:0 0 6px;color:#b91c1c;font-size:15px">🎯 模考失分診斷：錯誤題目對應評鑑範圍</h3>
+        ${Object.values(wrongByItem).sort((a, b) => b.qs.length - a.qs.length).map((g) => {
+          const allInScope = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === g.item);
+          return `<div class="row" style="padding:6px 0;border-top:1px dashed #fca5a5">
+            <span style="font-size:14px"><b>${esc(g.item)}</b> <span class="muted">（錯 ${g.qs.length} 題）</span></span>
+            <button class="goto mock-drill-scope" data-scope="${esc(g.item)}" style="background:#fee2e2;color:#b91c1c;font-weight:600">特訓此範圍 (${allInScope.length} 題)</button>
+          </div>`;
+        }).join('')}
+      </div>
+    ` : '';
+
     view.innerHTML = `
       <section class="card">
-        <h2>結果</h2>
+        <h2>模擬考結果</h2>
         <p class="score">${r.percent}％</p>
-        <p>答對 ${r.correct} / ${r.total}，答錯 ${r.wrong}</p>
-        <button class="primary" id="review">檢討錯題</button>
+        <p style="font-size:15px">
+          總分：答對 ${r.correct} / ${r.total} 題（${r.percent}％）
+          ${attemptedCount < pool.length ? `<br><span style="color:#0284c7;font-weight:600;font-size:14px">（已作答 ${attemptedCount} 題中答對 ${attemptedCorrect} 題，實答正確率：${attemptedPct}％）</span>` : ''}
+        </p>
+        ${mockDiagHtml}
+        <button class="primary" id="review">${wrongQs.length ? `檢討錯題 (${wrongQs.length})` : '檢視作答'}</button>
         <button id="back">回首頁</button>
       </section>`;
     $('#back').onclick = home;
-    $('#review').onclick = () => runPractice(pool.filter((q) => r.wrongIds.includes(q.id)));
+    $('#review').onclick = () => runPractice(wrongQs.length ? wrongQs : pool);
+    view.querySelectorAll('.mock-drill-scope').forEach((btn) => {
+      btn.onclick = () => {
+        const sc = btn.dataset.scope;
+        runPractice(shuffle(DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === sc)));
+      };
+    });
   }
   render();
 }
@@ -578,32 +1377,200 @@ function runMock(pool, mins) {
 function wrongbook() {
   setNav('wrong');
   const ids = wrongQuestionIds(DATA.questions, store.q);
-  const list = ids.map((id) => DATA.questions.find((q) => q.id === id));
+  const list = ids.map((id) => DATA.questions.find((q) => q.id === id)).filter(Boolean);
+  let wrongLv = prefLevel();
+  if (wrongLv !== '初級' && wrongLv !== '中級') wrongLv = '全部';
+
+  const bList = list.filter((q) => q.level === '初級');
+  const mList = list.filter((q) => q.level === '中級');
+
   view.innerHTML = `
     <section class="card">
-      <h2>錯題本</h2>
-      <p class="muted">答錯過、還沒掌握的題會留在這。同一題之後「連續答對 ${MASTER_BOX - 1} 次」就算掌握、自動移出。</p>
-      ${ids.length ? `<button class="primary" id="drill">只練這些錯題</button>` : '<p>目前沒有錯題，繼續加油。</p>'}
-      <ul class="wrong">${list.map((q) => `<li>${esc(q.question)} <span class="muted">（${esc(q.subject)}・再連對 ${Math.max(1, MASTER_BOX - (qp(q.id).box || 1))} 次就掌握）</span></li>`).join('')}</ul>
+      <h2>錯題本 · 錯誤題目對應學習範圍</h2>
+      <p class="muted">進步的第一性原理是「補不會，而不是無腦刷題」！錯題已自動對齊官方 iPAS 評鑑主題與評鑑內容（L111~L234），讓你精準定位弱點範圍並一鍵補強。同一題連續答對 ${MASTER_BOX - 1} 次即自動移出。</p>
+      <div class="level-tabs" id="wr-level-tabs">
+        <button class="level-tab ${wrongLv === '初級' ? 'on' : ''}" data-lv="初級">初級（${bList.length}）</button>
+        <button class="level-tab ${wrongLv === '中級' ? 'on' : ''}" data-lv="中級">中級（${mList.length}）</button>
+        <button class="level-tab ${wrongLv === '全部' ? 'on' : ''}" data-lv="全部">全部（${list.length}）</button>
+      </div>
+      <div id="wrong-container"></div>
     </section>`;
-  if (ids.length) $('#drill').onclick = () => runPractice(shuffle(list));
+
+  const renderList = (lv) => {
+    wrongLv = lv;
+    const filtered = lv === '初級' ? bList : lv === '中級' ? mList : list;
+    const container = $('#wrong-container');
+    if (!container) return;
+    view.querySelectorAll('#wr-level-tabs .level-tab').forEach((b) => b.classList.toggle('on', b.dataset.lv === lv));
+
+    // 按官方評鑑主題 (chapter) ➔ 評鑑內容 (syllabusItem) 分組診斷
+    const byTheme = new Map();
+    for (const q of filtered) {
+      const th = q.chapter || q.subject;
+      const it = q.syllabusItem || th;
+      if (!byTheme.has(th)) byTheme.set(th, { theme: th, subject: q.subject, items: new Map(), qs: [] });
+      const tGroup = byTheme.get(th);
+      tGroup.qs.push(q);
+      if (!tGroup.items.has(it)) tGroup.items.set(it, []);
+      tGroup.items.get(it).push(q);
+    }
+
+    const sortedThemes = [...byTheme.values()].sort((a, b) => b.qs.length - a.qs.length || a.theme.localeCompare(b.theme, 'zh-Hant'));
+
+    const radarHtml = sortedThemes.length ? `
+      <div style="margin:12px 0 18px;padding:14px;background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px">
+        <h3 style="margin:0 0 8px;font-size:16px">🗺️ 弱點學習範圍地圖（依錯題數排序，先救失分最多的範圍！）</h3>
+        ${sortedThemes.map((tg) => {
+          const itemRows = [...tg.items.entries()].sort((a, b) => b[1].length - a[1].length).map(([itemName, iQs]) => {
+            const fullPoolCount = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === itemName).length;
+            const hasGuideCard = (GUIDE_DATA.cards || []).some((c) => c.syllabusItem === itemName || c.chapter === tg.theme);
+            return `
+              <div class="row" style="padding:7px 10px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin-top:6px;flex-wrap:wrap;gap:6px">
+                <div>
+                  <span style="font-weight:600;font-size:14px;color:#1e293b">▸ ${esc(itemName)}</span>
+                  <span class="review-badge due" style="margin-left:6px">錯 ${iQs.length} 題</span>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                  <button class="goto wr-drill-wrong" data-item="${esc(itemName)}" style="background:#fee2e2;color:#b91c1c;font-weight:600">重練此處錯題 (${iQs.length})</button>
+                  <button class="goto wr-drill-all" data-item="${esc(itemName)}" style="background:#eff6ff;color:#1d4ed8;font-weight:600">刷滿此範圍題庫 (${fullPoolCount} 題)</button>
+                  ${hasGuideCard ? `<button class="goto wr-goto-guide" data-theme="${esc(tg.theme)}" style="background:#f0fdf4;color:#15803d;font-weight:600">📖 考點心智卡</button>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+
+          return `
+            <div style="margin-bottom:12px">
+              <div class="row" style="margin-bottom:4px">
+                <strong style="font-size:15px;color:var(--c-accent)">📂 ${esc(tg.theme)} <span class="muted" style="font-weight:normal;font-size:12px">（${esc(tg.subject)} · 共錯 ${tg.qs.length} 題）</span></strong>
+                <button class="goto wr-drill-theme" data-theme="${esc(tg.theme)}">練此主題全部錯題 (${tg.qs.length})</button>
+              </div>
+              ${itemRows}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    ` : '';
+
+    container.innerHTML = `
+      ${filtered.length ? `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <button class="primary" id="drill" style="margin:0">只練全部錯題（${filtered.length} 題）</button>
+          <button class="notion-btn" id="notion-wrong-sync" style="margin:0">📌 錯題同步至 Notion</button>
+          <button class="notion-btn alt" id="notion-wrong-exp" style="margin:0">📋 複製 Notion 格式</button>
+          <span id="notion-wrong-msg" class="muted" style="font-size:12px"></span>
+        </div>
+        ${radarHtml}
+        <h3 style="font-size:15px;margin:16px 0 8px">📋 錯題明細列表</h3>
+      ` : `<p class="muted">${lv === '全部' ? '目前沒有錯題，繼續加油。' : `目前沒有${lv}錯題。`}</p>`}
+      <ul class="wrong">${filtered.map((q) => `<li>
+        <div><strong>[${esc(q.syllabusItem || q.chapter || q.subject)}]</strong> ${esc(q.question)}</div>
+        <div class="muted" style="font-size:12px;margin-top:3px">
+          ${esc(q.level)}・${esc(q.chapter || q.subject)}${q.topic ? '・考點：' + esc(q.topic) : ''}・再連對 ${Math.max(1, MASTER_BOX - (qp(q.id).box || 1))} 次就掌握
+          <button class="goto wr-single-q" data-qid="${esc(q.id)}" style="margin-left:8px;padding:2px 8px;font-size:12px">單題重練</button>
+        </div>
+      </li>`).join('')}</ul>
+    `;
+    if (filtered.length && $('#drill')) {
+      $('#drill').onclick = () => runPractice(shuffle(filtered));
+    }
+    view.querySelectorAll('.wr-drill-wrong').forEach((btn) => {
+      btn.onclick = () => {
+        const it = btn.dataset.item;
+        runPractice(shuffle(filtered.filter((q) => (q.syllabusItem || q.chapter || q.subject) === it)));
+      };
+    });
+    view.querySelectorAll('.wr-drill-all').forEach((btn) => {
+      btn.onclick = () => {
+        const it = btn.dataset.item;
+        runPractice(shuffle(DATA.questions.filter((q) => (q.syllabusItem || q.chapter || q.subject) === it)));
+      };
+    });
+    view.querySelectorAll('.wr-drill-theme').forEach((btn) => {
+      btn.onclick = () => {
+        const th = btn.dataset.theme;
+        runPractice(shuffle(filtered.filter((q) => (q.chapter || q.subject) === th)));
+      };
+    });
+    view.querySelectorAll('.wr-goto-guide').forEach((btn) => {
+      btn.onclick = () => {
+        const th = btn.dataset.theme;
+        const code = th.split(' ')[0]; // e.g. L111, L113
+        guideActiveCat = '全部';
+        guideSearchKw = code;
+        guide();
+      };
+    });
+    view.querySelectorAll('.wr-single-q').forEach((btn) => {
+      btn.onclick = () => {
+        const q = DATA.questions.find((x) => x.id === btn.dataset.qid);
+        if (q) runPractice([q]);
+      };
+    });
+    if (filtered.length && $('#notion-wrong-sync')) {
+      $('#notion-wrong-sync').onclick = async () => {
+        const btn = $('#notion-wrong-sync');
+        const msg = $('#notion-wrong-msg');
+        const { token, dbId } = getNotionConfig();
+        if (!token || !dbId) { msg.textContent = '請先在「設定」設定 Notion Token 與 Database ID'; return; }
+        btn.disabled = true;
+        let count = 0;
+        for (let idx = 0; idx < filtered.length; idx++) {
+          msg.textContent = `同步中 (${idx + 1}/${filtered.length})…`;
+          try {
+            await syncQuestionToNotion(filtered[idx], qp(filtered[idx].id));
+            qp(filtered[idx].id).notionSyncedAt = Date.now();
+            count++;
+          } catch (e) { console.warn(e); }
+        }
+        save();
+        btn.disabled = false;
+        msg.textContent = `✓ 已成功同步 ${count} 題錯題至 Notion！`;
+      };
+    }
+    if (filtered.length && $('#notion-wrong-exp')) {
+      $('#notion-wrong-exp').onclick = async () => {
+        const text = toNotionMarkdown(filtered, store.q, `iPAS 錯題複習（${lv}）`);
+        try {
+          await navigator.clipboard.writeText(text);
+          $('#notion-wrong-msg').textContent = '✓ 已複製全部錯題之 Notion Toggle 格式！';
+        } catch {
+          $('#notion-wrong-msg').textContent = '複製失敗';
+        }
+      };
+    }
+  };
+
+  view.querySelectorAll('#wr-level-tabs .level-tab').forEach((b) => {
+    b.onclick = () => renderList(b.dataset.lv);
+  });
+  renderList(wrongLv);
 }
 
 function notes() {
   setNav('notes');
-  const items = DATA.questions.filter((q) => { const p = store.q[q.id]; return p && (p.note || p.starred); });
+  const items = DATA.questions.filter((q) => { const p = store.q[q.id]; return p && (p.note || p.studentAnswer || p.starred); });
   view.innerHTML = `
     <section class="card">
       <h2>我的筆記</h2>
-      <p class="muted">有寫筆記、或加星 ⭐ 的題目都在這。筆記可直接在下面改,會自動存。</p>
+      <p class="muted">有寫筆記、或加星 ⭐ 的題目都在這。支援一鍵匯出或同步至 Notion 資料庫進行 Active Recall 記憶！</p>
       ${items.length
-        ? '<button id="exp-notes">匯出筆記（Markdown）</button>'
+        ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+             <button id="exp-notes">匯出筆記（Markdown）</button>
+             <button id="exp-notion-md">匯出 Notion Active Recall 格式</button>
+             <button class="notion-btn" id="notion-sync-notes">📌 同步星標筆記至 Notion</button>
+             <span id="notion-notes-msg" class="muted" style="font-size:12px;width:100%;margin-top:2px"></span>
+           </div>`
         : '<p>還沒有筆記或星標題。練習時在題目下方寫筆記、或點 ☆ 加星,就會出現在這。</p>'}
       ${items.map((q) => {
         const p = qp(q.id);
         return `<div class="note-item">
           <div class="row"><span class="muted">${p.starred ? '⭐ ' : ''}${esc(q.subject)}</span>
-            <button class="goto" data-id="${esc(q.id)}">前往該題</button></div>
+            <span>
+              <button class="notion-btn" style="padding:4px 9px!important;font-size:12px!important" data-id="${esc(q.id)}">📌 存入 Notion</button>
+              <button class="goto" data-id="${esc(q.id)}">前往該題</button>
+            </span>
+          </div>
           <p class="qn">${esc(q.question)}</p>
           <textarea class="note-edit" data-id="${esc(q.id)}" rows="2" placeholder="寫下你的理解或記憶點…">${esc(p.note || '')}</textarea>
         </div>`;
@@ -611,71 +1578,184 @@ function notes() {
     </section>`;
   view.querySelectorAll('.note-edit').forEach((t) => (t.oninput = (e) => { qp(e.target.dataset.id).note = e.target.value; save(); }));
   view.querySelectorAll('.goto').forEach((b) => (b.onclick = () => { const q = DATA.questions.find((x) => x.id === b.dataset.id); if (q) runPractice([q]); }));
-  if (items.length) $('#exp-notes').onclick = () => download('ipas-notes.md', toMarkdown(DATA.questions, store.q), 'text/markdown');
+  view.querySelectorAll('.note-item .notion-btn').forEach((b) => (b.onclick = async () => {
+    const q = DATA.questions.find((x) => x.id === b.dataset.id);
+    if (!q) return;
+    const { token, dbId } = getNotionConfig();
+    if (!token || !dbId) { alert('請先至「設定」設定 Notion Token 與 Database ID'); return; }
+    b.disabled = true; b.textContent = '同步中…';
+    try {
+      await syncQuestionToNotion(q, qp(q.id));
+      qp(q.id).notionSyncedAt = Date.now(); save();
+      b.textContent = '✓ 已存入';
+    } catch (err) {
+      b.disabled = false; b.textContent = '📌 存入 Notion';
+      alert('同步失敗：' + err.message);
+    }
+  }));
+  if (items.length) {
+    $('#exp-notes').onclick = () => download('ipas-notes.md', toMarkdown(DATA.questions, store.q), 'text/markdown');
+    $('#exp-notion-md').onclick = () => download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q), 'text/markdown');
+    $('#notion-sync-notes').onclick = async () => {
+      const btn = $('#notion-sync-notes');
+      const msg = $('#notion-notes-msg');
+      const { token, dbId } = getNotionConfig();
+      if (!token || !dbId) { msg.textContent = '請先至「設定」設定 Notion Token 與 Database ID'; return; }
+      btn.disabled = true;
+      let okCount = 0;
+      for (let idx = 0; idx < items.length; idx++) {
+        msg.textContent = `正在同步至 Notion (${idx + 1}/${items.length})…`;
+        try {
+          await syncQuestionToNotion(items[idx], qp(items[idx].id));
+          qp(items[idx].id).notionSyncedAt = Date.now();
+          okCount++;
+        } catch (err) {
+          console.warn('Sync item failed:', err);
+        }
+      }
+      save();
+      btn.disabled = false;
+      msg.textContent = `✓ 已成功同步 ${okCount} / ${items.length} 題至 Notion 資料庫！`;
+    };
+  }
 }
 
 function stats() {
   setNav('stats');
-  const s = progressStats(DATA.questions, store.q);
-  const cover = s.total ? Math.round((s.practiced / s.total) * 1000) / 10 : 0;
-  const rec = store.recent || [];
-  const recAcc = rec.length ? Math.round((rec.reduce((a, b) => a + b, 0) / rec.length) * 1000) / 10 : null;
-  // 各章節（範圍）正確率與掌握度
-  const byCh = new Map();
-  for (const q of DATA.questions) {
-    const k = rangeKey(q);
-    const p = store.q[q.id] || {};
-    const c = byCh.get(k) || { key: k, total: 0, attempts: 0, correct: 0, mastered: 0 };
-    c.total++; c.attempts += p.attempts || 0; c.correct += p.correct || 0;
-    if (isMastered(p.box)) c.mastered++;
-    byCh.set(k, c);
-  }
-  const chRows = [...byCh.values()].map((x) =>
-    `<tr><td>${esc(x.key)}</td><td>${x.attempts ? Math.round((x.correct / x.attempts) * 1000) / 10 + '％' : '—'}</td><td>${x.mastered}/${x.total}</td></tr>`).join('');
-  // 成就徽章
-  const strk = liveStreak();
-  const badges = [
-    { on: s.practiced >= 50, t: '練習 50 題' },
-    { on: s.practiced >= 200, t: '練習 200 題' },
-    { on: s.practiced >= s.total, t: '全部練過' },
-    { on: strk >= 3, t: '連續 3 天' },
-    { on: strk >= 7, t: '連續 7 天' },
-    { on: strk >= 30, t: '連續 30 天' },
-    { on: recAcc != null && recAcc >= 80, t: '近期 80% 命中' },
-    { on: [...byCh.values()].some((c) => c.total > 0 && c.mastered === c.total), t: '某範圍全掌握' },
-  ];
-  const badgeHtml = badges.map((b) => `<span class="badge ${b.on ? '' : 'lock'}">${b.on ? '✓ ' : ''}${b.t}</span>`).join('');
-  // 最近 14 天題數趨勢
-  const days14 = [];
-  for (let i = 13; i >= 0; i--) { const d = new Date(today() + 'T00:00:00'); d.setDate(d.getDate() - i); days14.push(ymd(d)); }
-  const hist = store.history || {};
-  const maxA = Math.max(1, ...days14.map((d) => (hist[d] && hist[d].a) || 0));
-  const bars = days14.map((d) => {
-    const a = (hist[d] && hist[d].a) || 0;
-    const h = a ? Math.max(3, Math.round((a / maxA) * 56)) : 0;
-    return `<div class="tcol" title="${d}：${a} 題"><span class="tnum">${a || ''}</span><div class="bar" style="height:${h}px"></div></div>`;
-  }).join('');
+  let stLv = prefLevel();
+  if (stLv !== '初級' && stLv !== '中級') stLv = '全部';
+
   view.innerHTML = `
     <section class="card">
       <h2>學習統計</h2>
+      <div class="level-tabs" id="st-level-tabs">
+        <button class="level-tab ${stLv === '初級' ? 'on' : ''}" data-lv="初級">初級</button>
+        <button class="level-tab ${stLv === '中級' ? 'on' : ''}" data-lv="中級">中級</button>
+        <button class="level-tab ${stLv === '全部' ? 'on' : ''}" data-lv="全部">全部</button>
+      </div>
+      <div id="stats-body"></div>
+    </section>`;
+
+  const renderStats = (lv) => {
+    stLv = lv;
+    view.querySelectorAll('#st-level-tabs .level-tab').forEach((b) => b.classList.toggle('on', b.dataset.lv === lv));
+    const targetQs = lv === '全部' ? DATA.questions : DATA.questions.filter((q) => q.level === lv);
+    const s = progressStats(targetQs, store.q);
+    const cover = s.total ? Math.round((s.practiced / s.total) * 1000) / 10 : 0;
+    const rec = store.recent || [];
+    const recAcc = rec.length ? Math.round((rec.reduce((a, b) => a + b, 0) / rec.length) * 1000) / 10 : null;
+    // 各章節（評鑑主題）與評鑑內容（細項）正確率與掌握度
+    const byCh = new Map();
+    const byItem = new Map();
+    for (const q of targetQs) {
+      const k = rangeKey(q);
+      const ik = q.syllabusItem || k;
+      const p = store.q[q.id] || {};
+      const isWrongNow = (p.wrong || 0) > 0 && !isMastered(p.box);
+
+      const c = byCh.get(k) || { key: k, total: 0, attempts: 0, correct: 0, mastered: 0, wrongNow: 0 };
+      c.total++; c.attempts += p.attempts || 0; c.correct += p.correct || 0;
+      if (isMastered(p.box)) c.mastered++;
+      if (isWrongNow) c.wrongNow++;
+      byCh.set(k, c);
+
+      const ic = byItem.get(ik) || { key: ik, theme: k, total: 0, attempts: 0, correct: 0, mastered: 0, wrongNow: 0 };
+      ic.total++; ic.attempts += p.attempts || 0; ic.correct += p.correct || 0;
+      if (isMastered(p.box)) ic.mastered++;
+      if (isWrongNow) ic.wrongNow++;
+      byItem.set(ik, ic);
+    }
+    const chRows = [...byCh.values()].sort((a, b) => a.key.localeCompare(b.key, 'zh-Hant')).map((x) =>
+      `<tr>
+        <td><b>${esc(x.key)}</b></td>
+        <td>${x.attempts ? Math.round((x.correct / x.attempts) * 1000) / 10 + '％' : '—'}</td>
+        <td>${x.wrongNow ? `<span style="color:var(--c-bad);font-weight:700">${x.wrongNow} 題</span>` : '0'}</td>
+        <td>${x.mastered}/${x.total}</td>
+        <td><button class="goto st-drill-ch" data-ch="${esc(x.key)}" style="padding:3px 8px;font-size:12px">特訓</button></td>
+      </tr>`).join('');
+
+    const itemRows = [...byItem.values()].sort((a, b) => b.wrongNow - a.wrongNow || a.key.localeCompare(b.key, 'zh-Hant')).map((x) =>
+      `<tr>
+        <td>${esc(x.key)}</td>
+        <td>${x.attempts ? Math.round((x.correct / x.attempts) * 1000) / 10 + '％' : '—'}</td>
+        <td>${x.wrongNow ? `<span style="color:var(--c-bad);font-weight:700">${x.wrongNow} 題</span>` : '0'}</td>
+        <td>${x.mastered}/${x.total}</td>
+        <td><button class="goto st-drill-item" data-item="${esc(x.key)}" style="padding:3px 8px;font-size:12px">特訓</button></td>
+      </tr>`).join('');
+
+    // 成就徽章
+    const strk = liveStreak();
+    const badges = [
+      { on: s.practiced >= 50, t: '練習 50 題' },
+      { on: s.practiced >= 200, t: '練習 200 題' },
+      { on: s.practiced >= s.total && s.total > 0, t: '全部練過' },
+      { on: strk >= 3, t: '連續 3 天' },
+      { on: strk >= 7, t: '連續 7 天' },
+      { on: strk >= 30, t: '連續 30 天' },
+      { on: recAcc != null && recAcc >= 80, t: '近期 80% 命中' },
+      { on: [...byCh.values()].some((c) => c.total > 0 && c.mastered === c.total), t: '某範圍全掌握' },
+    ];
+    const badgeHtml = badges.map((b) => `<span class="badge ${b.on ? '' : 'lock'}">${b.on ? '✓ ' : ''}${b.t}</span>`).join('');
+    // 最近 14 天題數趨勢
+    const days14 = [];
+    for (let i = 13; i >= 0; i--) { const d = new Date(today() + 'T00:00:00'); d.setDate(d.getDate() - i); days14.push(ymd(d)); }
+    const hist = store.history || {};
+    const maxA = Math.max(1, ...days14.map((d) => (hist[d] && hist[d].a) || 0));
+    const bars = days14.map((d) => {
+      const a = (hist[d] && hist[d].a) || 0;
+      const h = a ? Math.max(3, Math.round((a / maxA) * 56)) : 0;
+      return `<div class="tcol" title="${d}：${a} 題"><span class="tnum">${a || ''}</span><div class="bar" style="height:${h}px"></div></div>`;
+    }).join('');
+
+    $('#stats-body').innerHTML = `
       <div class="grid">
         <div><b>${cover}％</b><span>涵蓋率（練過 ${s.practiced}/${s.total}）</span></div>
         <div><b>${recAcc == null ? '—' : recAcc + '％'}</b><span>近期正確率（最近 ${rec.length}）</span></div>
         <div><b>${s.wrongNow}</b><span>目前錯題</span></div>
         <div><b>${s.mastered}</b><span>已掌握</span></div>
       </div>
-      <p class="muted" style="font-size:13px">「掌握」= 同一題連續答對 2 次。用「智慧複習」會優先讓你重做沒掌握與答錯的題，掌握數才會往上跑。</p>
+      <p class="muted" style="font-size:13px">「掌握」= 同一題連續答對 2 次。考試的第一性原理是「得分，而不是全部讀完」，優先點擊下方錯題最多的評鑑範圍進行特訓！</p>
       <h3>成就</h3>
       <div class="badges">${badgeHtml}</div>
       <h3>最近 14 天題數</h3>
       <div class="trend">${bars}</div>
       <div class="trend-lab"><span>${days14[0].slice(5)}</span><span>今天</span></div>
-      <h3>各範圍弱點</h3>
+      <h3>官方評鑑主題掌握度（${esc(lv)}）</h3>
       <table>
-        <tr><th>範圍</th><th>正確率</th><th>掌握</th></tr>
+        <tr><th>評鑑主題</th><th>正確率</th><th>待補錯題</th><th>掌握</th><th>行動</th></tr>
         ${chRows}
       </table>
-    </section>`;
+      <h3 style="margin-top:18px">官方評鑑內容細項診斷（${esc(lv)} · 依待補錯題排序）</h3>
+      <table>
+        <tr><th>評鑑內容細項</th><th>正確率</th><th>待補錯題</th><th>掌握</th><th>行動</th></tr>
+        ${itemRows}
+      </table>
+    `;
+
+    view.querySelectorAll('.st-drill-ch').forEach((btn) => {
+      btn.onclick = () => {
+        const ch = btn.dataset.ch;
+        const pool = targetQs.filter((q) => rangeKey(q) === ch)
+          .map((q) => ({ q, pr: reviewPriority(store.q[q.id]), r: Math.random() }))
+          .sort((a, b) => a.pr - b.pr || a.r - b.r).map((x) => x.q);
+        runPractice(pool);
+      };
+    });
+    view.querySelectorAll('.st-drill-item').forEach((btn) => {
+      btn.onclick = () => {
+        const it = btn.dataset.item;
+        const pool = targetQs.filter((q) => (q.syllabusItem || rangeKey(q)) === it)
+          .map((q) => ({ q, pr: reviewPriority(store.q[q.id]), r: Math.random() }))
+          .sort((a, b) => a.pr - b.pr || a.r - b.r).map((x) => x.q);
+        runPractice(pool);
+      };
+    });
+  };
+
+  view.querySelectorAll('#st-level-tabs .level-tab').forEach((b) => {
+    b.onclick = () => renderStats(b.dataset.lv);
+  });
+  renderStats(stLv);
 }
 
 // 官方考試資訊小區塊:及格標準(穩定)+ 各級下次考試日期一鍵填入(非強制,初級中級日期不同)
@@ -706,8 +1786,15 @@ function settings() {
       <span id="set-install-msg" class="muted"></span>
 
       <h3>學習目標</h3>
+      <label>目標考試級別
+        <select id="set-level">
+          <option value="初級" ${prefLevel() === '初級' ? 'selected' : ''}>初級（AI 應用規劃師 初級・2 科目）</option>
+          <option value="中級" ${prefLevel() === '中級' ? 'selected' : ''}>中級（AI 應用規劃師 中級・3 科目）</option>
+          <option value="全部" ${prefLevel() === '全部' ? 'selected' : ''}>全部（初級 + 中級混合）</option>
+        </select>
+      </label>
       <label>每日目標題數
-        <input id="set-goal" type="number" min="1" max="790" value="${dailyGoal()}">
+        <input id="set-goal" type="number" min="1" max="${DATA.questions.length || 890}" value="${dailyGoal()}">
       </label>
       <label>考試日期（首頁倒數用）
         <input id="set-exam" type="date" value="${(store.settings && store.settings.examDate) || ''}">
@@ -734,6 +1821,32 @@ function settings() {
       <button id="code-set">套用此碼</button>
       ${SYNC_URL ? '<button id="sync-now">立即同步</button>' : ''}
       <span id="sync-msg" class="muted"></span>
+
+      <h3>Notion 記憶資料庫同步</h3>
+      <p class="muted">將易忘關鍵字、星標題目與錯題同步至你的 Notion Database，利用 Toggle 摺疊進行 Active Recall 主動回憶！</p>
+      <label>Notion Integration Token
+        <input id="notion-token" type="password" placeholder="secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" value="${esc(store.settings?.notionToken || '')}">
+      </label>
+      <label>Notion Database ID
+        <input id="notion-db" placeholder="32 字元資料庫 ID（從資料庫網址取得）" value="${esc(store.settings?.notionDbId || '')}">
+      </label>
+      <label>API Proxy 端點（選填，留空自動使用預設代理）
+        <input id="notion-proxy" placeholder="/notion" value="${esc(store.settings?.notionProxy || '')}">
+      </label>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button id="notion-test-btn">連線測試</button>
+        <button class="notion-btn" id="notion-sync-all-btn">⚡ 同步全部星標與錯題</button>
+        <button id="exp-notion-all">匯出 Notion Toggle Markdown</button>
+        <span id="notion-cfg-msg" class="muted" style="font-size:12px;width:100%;margin-top:2px"></span>
+      </div>
+      <div class="guide" style="margin-top:10px">
+        <b>如何串接 Notion 資料庫？</b>
+        <ol style="margin:4px 0 0;padding-left:18px">
+          <li>至 <a href="https://www.notion.so/profile/integrations" target="_blank" rel="noopener">Notion My Integrations</a> 建立 Integration，取得 Internal Secret。</li>
+          <li>在 Notion 建立題庫資料庫，點右上角 <code>•••</code> → <code>Connections</code> → 連接該 Integration。</li>
+          <li>複製資料庫連結中 32 碼英數字即為 Database ID（例如 notion.so/workspace/<b>a1b2c3d4...</b>?v=...）。</li>
+        </ol>
+      </div>
 
       <h3>備份 / 轉移</h3>
       <button id="exp">匯出進度（JSON）</button>
@@ -766,6 +1879,11 @@ function settings() {
         : '（Chrome ⋮ 選單 → 安裝應用程式 / 加到主畫面）';
     }
   }
+  if ($('#set-level')) $('#set-level').onchange = (e) => {
+    store.settings ||= {};
+    store.settings.prefLevel = e.target.value;
+    save();
+  };
   $('#set-goal').onchange = (e) => { store.settings ||= {}; store.settings.dailyGoal = Math.max(1, +e.target.value || 20); save(); };
   $('#set-exam').onchange = (e) => { store.settings ||= {}; store.settings.examDate = e.target.value; save(); };
   view.querySelectorAll('.exam-pick').forEach((b) => (b.onclick = () => {
@@ -816,6 +1934,58 @@ function settings() {
     $('#sync-msg').textContent = pushed || pulled ? '已同步' : '同步失敗（檢查網路或同步碼）';
     if (pulled) setTimeout(settings, 600);
   };
+  if ($('#notion-token')) $('#notion-token').onchange = (e) => {
+    store.settings ||= {}; store.settings.notionToken = e.target.value.trim(); save();
+  };
+  if ($('#notion-db')) $('#notion-db').onchange = (e) => {
+    store.settings ||= {}; store.settings.notionDbId = e.target.value.trim(); save();
+  };
+  if ($('#notion-proxy')) $('#notion-proxy').onchange = (e) => {
+    store.settings ||= {}; store.settings.notionProxy = e.target.value.trim(); save();
+  };
+  if ($('#notion-test-btn')) $('#notion-test-btn').onclick = async () => {
+    const msg = $('#notion-cfg-msg');
+    msg.textContent = '測試連線中…';
+    try {
+      cachedDbSchema = null;
+      const db = await fetchDbSchema();
+      const title = db.title?.[0]?.plain_text || '資料庫';
+      msg.textContent = `✓ 連線成功！已連接 Notion 資料庫「${title}」`;
+    } catch (err) {
+      msg.textContent = `連線失敗：${err.message}`;
+    }
+  };
+  if ($('#notion-sync-all-btn')) $('#notion-sync-all-btn').onclick = async () => {
+    const btn = $('#notion-sync-all-btn');
+    const msg = $('#notion-cfg-msg');
+    const { token, dbId } = getNotionConfig();
+    if (!token || !dbId) { msg.textContent = '請先填寫 Token 與 Database ID'; return; }
+    btn.disabled = true;
+    const targetQs = DATA.questions.filter((q) => {
+      const p = store.q[q.id];
+      return p && (p.starred || p.note || p.wrong > 0);
+    });
+    if (!targetQs.length) {
+      btn.disabled = false;
+      msg.textContent = '目前沒有星標、筆記或錯題需要同步';
+      return;
+    }
+    let ok = 0;
+    for (let idx = 0; idx < targetQs.length; idx++) {
+      msg.textContent = `正在同步 (${idx + 1}/${targetQs.length})…`;
+      try {
+        await syncQuestionToNotion(targetQs[idx], qp(targetQs[idx].id));
+        qp(targetQs[idx].id).notionSyncedAt = Date.now();
+        ok++;
+      } catch (e) { console.warn(e); }
+    }
+    save();
+    btn.disabled = false;
+    msg.textContent = `✓ 已成功同步 ${ok} / ${targetQs.length} 題至 Notion！`;
+  };
+  if ($('#exp-notion-all')) $('#exp-notion-all').onclick = () => {
+    download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q), 'text/markdown');
+  };
   $('#exp').onclick = () => download('ipas-progress.json', JSON.stringify(store, null, 2), 'application/json');
   $('#exp-md').onclick = () => download('ipas-notes.md', toMarkdown(DATA.questions, store.q), 'text/markdown');
   $('#imp-btn').onclick = () => $('#imp').click();
@@ -824,13 +1994,13 @@ function settings() {
     if (!f) return;
     try {
       const s = JSON.parse(await f.text());
-      if (s && s.q) { store = s; save(); alert('已匯入。'); home(); }
+      if (s && s.q) { store = mergeStores(store, s); save(); alert('已匯入並合併進度。'); home(); }
       else alert('檔案格式不符。');
     } catch { alert('讀取失敗。'); }
   };
   $('#reset').onclick = async () => {
     if (!confirm('確定清除本機所有作答進度與筆記？')) return;
-    store = { v: 1, syncCode: makeCode(), codeFresh: true, q: {} };
+    store = { v: 1, syncCode: makeCode(), codeFresh: true, q: {}, cards: {}, history: {}, recent: [] };
     await ensureFreshCode(); // 新碼先查重,再 save(save 會標 dirty 上傳)
     save(); settings();
   };
@@ -857,7 +2027,7 @@ function deviceLabel() {
   return `${os} · ${br}`;
 }
 
-const ROUTES = { home, mock: mockSetup, wrong: wrongbook, notes, stats, settings };
+const ROUTES = { home, guide, mock: mockSetup, wrong: wrongbook, notes, stats, settings };
 
 // ---- boot ----
 async function boot() {
@@ -878,17 +2048,24 @@ async function boot() {
   try {
     DATA = await (await fetch('questions.json')).json();
   } catch {
-    view.innerHTML = `<section class="card"><p class="bad">載入 questions.json 失敗。請用本機伺服器開啟（例如 <code>python3 -m http.server</code>）。</p></section>`;
+    view.innerHTML = `<section class="card"><p class="bad">載入 questions.json 失敗。請用本機伺服器開啟（例如 <code>node server.mjs</code>）。</p></section>`;
     return;
   }
   try { CONCEPTS = ((await (await fetch('concepts.json')).json()).cards) || []; } catch { CONCEPTS = []; }
+  try { GUIDE_DATA = await (await fetch('guide-cards.json')).json(); } catch { GUIDE_DATA = { categories: [], cards: [] }; }
   try { EXAMINFO = await (await fetch('exam-dates.json')).json(); } catch { EXAMINFO = null; }
   if (DATA.meta?.title) $('#title').textContent = DATA.meta.title;
   if (DATA.meta?.note) { const n = $('#banner'); n.textContent = DATA.meta.note; n.hidden = false; }
+  await pullLocalDisk(); // 優先從本機硬碟 local-progress.json 救回或合併進度（防瀏覽器重整/清除快取遺失）
   localStorage.setItem(STORE_KEY, JSON.stringify(store)); // 落地可能新生成的 syncCode(不動 updatedAt)
   await ensureFreshCode(); // 全新自動碼先查重(要在 pull 之前,否則撞碼會拉到陌生人的進度)
-  if (SYNC_URL) await pullSync(); // 開啟先拉雲端，單人多裝置就不會互蓋
-  document.addEventListener('visibilitychange', () => { if (document.hidden) pushSync({ keepalive: true }); }); // checkpoint:切走/關頁前 flush
+  if (SYNC_URL) await pullSync(); // 開啟先拉雲端，並用 mergeStores 智慧合併，絕不覆蓋掉今日進度
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      saveLocalDisk();
+      pushSync({ keepalive: true });
+    }
+  }); // checkpoint:切走/關頁前 flush
   home();
 }
 boot();

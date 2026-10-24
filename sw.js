@@ -1,8 +1,8 @@
 // 離線快取:app shell + 題庫。stale-while-revalidate(先給快取、背景更新)。
 // 改版要更新快取時,把 CACHE 版號 +1。
 
-const CACHE = "ipas-v62";
-const SHELL = ['./', 'index.html', 'build.html', 'app.js', 'core.js', 'manifest.json', 'favicon.svg', 'questions.json', 'concepts.json', 'exam-dates.json', 'icon-192.png', 'icon-512.png'];
+const CACHE = "ipas-v75";
+const SHELL = ['./', 'index.html', 'build.html', 'app.js', 'core.js', 'guide-cards.json', 'manifest.json', 'favicon.svg', 'questions.json', 'concepts.json', 'exam-dates.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
@@ -42,8 +42,10 @@ self.addEventListener('notificationclick', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const r = e.request;
-  // 只接管同源 GET;跨網域(同步 worker)不攔
-  if (r.method !== 'GET' || new URL(r.url).origin !== location.origin) return;
+  const u = new URL(r.url);
+  // 只接管同源靜態檔 GET;API 端點(/local-progress, /notion/)與跨網域不攔
+  if (r.method !== 'GET' || u.origin !== location.origin) return;
+  if (u.pathname.startsWith('/local-progress') || u.pathname.startsWith('/notion/')) return;
   e.respondWith(caches.open(CACHE).then(async (c) => {
     const cached = await c.match(r, { ignoreSearch: true });
     const net = fetch(r).then((res) => { if (res && res.ok) c.put(r, res.clone()).catch(() => {}); return res; }).catch(() => cached);

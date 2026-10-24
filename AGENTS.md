@@ -13,6 +13,7 @@
 | `core.test.mjs` | `core.js` 的測試 | 改邏輯要同步更新斷言 |
 | `questions.json` | **題庫**(主要要改的就是這個) | 見下方 schema |
 | `concepts.json` | 每日 AI 觀念卡池 | `{ "cards": [...] }` |
+| `guide-cards.json` | 考點速查心智卡池（科目1弱點導航） | `{ "categories": [...], "cards": [...] }` |
 | `sw.js` | Service Worker(離線快取 + 推播顯示) | 改任何快取檔就把 `CACHE` 版號 +1 |
 | `manifest.json` | PWA 安裝資訊 | |
 | `assets/*.png` | 帶圖題的圖 | |

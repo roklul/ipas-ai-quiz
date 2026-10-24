@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>iPAS AI 應用規劃師 模擬考練習 | 890 題官方試題與範例</title>
+<title>iPAS AI 應用規劃師 模擬考練習 | 1,557 題官方試題與範例（初級 919 題 100% 詳解）</title>
 <meta name="description" content="iPAS AI 應用規劃師（初級・中級）線上模擬考。890 題官方試題（歷屆公告 711 + 學習指引範例 179，皆官方答案），含練習/計時模擬考/錯題本/弱點統計/筆記，免費、免登入、可離線、可裝到手機。">
 <link rel="canonical" href="https://yazelin.github.io/ipas-ai-quiz/">
 <meta name="theme-color" content="#2563eb">
@@ -41,16 +41,11 @@
   header h1 { font-size:18px; margin:0; }
   #banner { max-width:720px; margin:0 auto 8px; padding:8px 12px; font-size:13px; color:#92400e; background:#fef3c7; border-radius:8px; }
   nav { display:flex; gap:4px; justify-content:center; flex-wrap:wrap; padding:0 8px 8px; }
-  nav button { border:0; background:none; padding:8px 12px; border-radius:8px; color:var(--c-muted); font-size:15px; cursor:pointer; }
+  nav button { border:0; background:none; padding:7px 10px; border-radius:8px; color:var(--c-muted); font-size:14px; cursor:pointer; }
   nav button.on { background:var(--c-card); color:var(--c-accent); font-weight:600; box-shadow:0 1px 2px rgba(0,0,0,.06); }
-  /* 六顆分頁在 430px 以下會擠到第二行(六顆總寬 374px,可用寬度只有視窗寬減 32)。
-     iPhone 14/15 的 390/393、Pixel 的 412、iPhone SE 2/3 的 375 全中,只有 430 放得下。
-     只收窄內距與間距,字級不動:最窄的「筆記」仍有 46px 寬,守住 44px 點擊區下限。
-     ponytail: 360px 起單行;320px(iPhone SE 一代那種)仍會換行,再擠下去就得把字級
-     或點擊區縮到標準以下,不值得為一支 2016 年的機器破無障礙底線,讓它照舊換行。 */
-  @media (max-width: 429px) {
+  @media (max-width: 480px) {
     nav { gap:2px; padding:0 2px 8px; }
-    nav button { padding:8px 8px; }
+    nav button { padding:6px 8px; font-size:13px; }
   }
   main { max-width:720px; margin:0 auto; padding:8px 12px 48px; }
   .card { background:var(--c-card); border:1px solid var(--c-line); border-radius:14px; padding:20px; margin-bottom:16px; animation:card-in .18s ease both; }
@@ -85,6 +80,15 @@
   ul.wrong { padding-left:18px; } ul.wrong li { margin:6px 0; }
   .range-head { margin-bottom:6px; }
   .range-head button { background:#eef0f3; border:0; padding:4px 10px; border-radius:6px; font-size:13px; cursor:pointer; margin-left:6px; }
+  .level-tabs { display:inline-flex; gap:4px; margin:8px 0 14px; background:#f1f5f9; padding:4px; border-radius:10px; max-width:100%; flex-wrap:wrap; }
+  .level-tab { border:0; background:transparent; padding:6px 14px; border-radius:7px; font-size:13px; font-weight:500; cursor:pointer; color:var(--c-muted); transition:all .15s; font-family:inherit; }
+  .level-tab.on { background:#fff; color:var(--c-accent); font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .notion-row { display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .notion-btn { background:#111827!important; color:#fff!important; border:0!important; padding:6px 12px!important; border-radius:7px!important; font-size:13px!important; font-weight:500!important; cursor:pointer; display:inline-flex; align-items:center; gap:5px; transition:opacity .15s; margin:0!important; }
+  .notion-btn:hover { opacity:.9; }
+  .notion-btn.alt { background:#f1f5f9!important; color:var(--c-text)!important; border:1px solid var(--c-line)!important; }
+  .notion-btn.alt:hover { background:#e2e8f0!important; }
+  .notion-btn:disabled { opacity:.5; cursor:not-allowed; }
   .range-group { margin-bottom:10px; }
   .range-lv { font-size:13px; font-weight:600; color:var(--c-muted); margin:8px 0 4px; }
   .range-item { display:flex; align-items:center; gap:8px; margin:0; padding:8px 10px; border:1px solid var(--c-line); border-radius:8px; margin-bottom:6px; cursor:pointer; }
@@ -133,6 +137,40 @@
   .code { font-family:ui-monospace,monospace; font-size:20px; background:#f8fafc; padding:10px; border-radius:8px; text-align:center; letter-spacing:1px; }
   h3.danger, button.danger { color:var(--c-bad); }
   button.danger { border:1px solid var(--c-bad)!important; background:#fff!important; }
+  /* 學習指引考點速查卡 */
+  .guide-header { margin-bottom:14px; }
+  .guide-header h2 { margin:0 0 4px; font-size:20px; }
+  .guide-tabs { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 14px; }
+  .guide-cat-tab { border:1px solid var(--c-line); background:#fff; padding:6px 12px; border-radius:20px; font-size:13px; cursor:pointer; color:var(--c-muted); transition:all .15s; font-family:inherit; }
+  .guide-cat-tab.on { background:var(--c-accent); color:#fff; border-color:var(--c-accent); font-weight:600; }
+  .guide-card { background:#fff; border:1px solid var(--c-line); border-radius:12px; padding:16px; margin-bottom:14px; box-shadow:0 1px 3px rgba(0,0,0,.03); transition:border-color .15s, box-shadow .15s; }
+  .guide-card:hover { border-color:#cbd5e1; box-shadow:0 3px 8px rgba(0,0,0,.06); }
+  .guide-card-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; gap:8px; }
+  .guide-card-title { font-size:16px; font-weight:700; color:var(--c-ink); margin:0; line-height:1.4; }
+  .guide-card-cat { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; white-space:nowrap; }
+  .guide-card-sub { font-size:13px; color:var(--c-muted); margin:0 0 10px; }
+  .guide-card-body { display:flex; flex-direction:column; gap:8px; }
+  .guide-item { padding:8px 10px; border-radius:8px; font-size:14px; line-height:1.5; }
+  .guide-item b { font-weight:600; display:inline-block; min-width:80px; }
+  .guide-item.fun { background:#f8fafc; border-left:3px solid #3b82f6; }
+  .guide-item.fun b { color:#1d4ed8; }
+  .guide-item.sce { background:#f0fdf4; border-left:3px solid #22c55e; }
+  .guide-item.sce b { color:#15803d; }
+  .guide-item.trp { background:#fef2f2; border-left:3px solid #ef4444; }
+  .guide-item.trp b { color:#b91c1c; }
+  .guide-card-footer { display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:10px; border-top:1px dashed var(--c-line); flex-wrap:wrap; gap:8px; }
+  .guide-quiz-btn { background:var(--c-accent)!important; color:#fff!important; border:0!important; padding:7px 14px!important; border-radius:8px!important; font-size:13px!important; font-weight:600!important; cursor:pointer; display:inline-flex; align-items:center; gap:4px; margin:0!important; }
+  .guide-quiz-btn:hover { opacity:.9; }
+  .guide-copy-btn { background:#f1f5f9!important; color:var(--c-ink)!important; border:1px solid var(--c-line)!important; padding:6px 12px!important; border-radius:8px!important; font-size:12px!important; cursor:pointer; margin:0!important; }
+  .guide-copy-btn:hover { background:#e2e8f0!important; }
+  /* 艾賓浩斯遺忘曲線複習 */
+  .review-card { background:#fffbeb; border:1px solid #fde68a; }
+  .review-card h3 { color:#b45309; }
+  .review-badge { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:600; padding:3px 8px; border-radius:999px; background:#fef3c7; color:#92400e; border:1px solid #fde68a; }
+  .review-badge.due { background:#fee2e2; color:#b91c1c; border-color:#fca5a5; }
+  .review-toggle-btn { border:1px solid var(--c-line); background:#fff; font-size:13px; padding:5px 10px; border-radius:8px; cursor:pointer; color:var(--c-muted); display:inline-flex; align-items:center; gap:4px; transition:all .15s; }
+  .review-toggle-btn.on { background:#fef3c7; color:#92400e; border-color:#f59e0b; font-weight:600; }
+  .review-toggle-btn.due { background:#fee2e2; color:#b91c1c; border-color:#ef4444; font-weight:600; }
   @media (prefers-reduced-motion: reduce) { .card { animation:none; } .opt { transition:none; } .opt:active { transform:none; } }
 </style>
 </head>
@@ -142,6 +180,7 @@
     <p id="banner" hidden></p>
     <nav>
       <button data-v="home" class="on">練習</button>
+      <button data-v="guide">學習指引</button>
       <button data-v="mock">模擬考</button>
       <button data-v="wrong">錯題本</button>
       <button data-v="notes">筆記</button>
@@ -172,7 +211,16 @@
     <p class="muted">題目為 iPAS 官方公告試題與學習指引（答案皆官方）；歷屆題解析為本站自寫、學習指引題為官方解析，僅供參考。發現答案有誤，歡迎用題卡的「這題有誤？」回報；交流請到「討論區」。</p>
   </footer>
   <script type="module" src="app.js"></script>
-  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});</script>
+  <script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      reg.update();
+    }).catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      window.location.reload();
+    });
+  }
+</script>
 <!-- yz-promo-footer v11 | 三件套+BMC 注意力效果 | https://github.com/yazelin/promo-footer-skill -->
 <script>
 (function(){"use strict";
