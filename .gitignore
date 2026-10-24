@@ -5,3 +5,5 @@ worker/.wrangler/
 worker/node_modules/
 resource-change.md
 resource-change-title.txt
+
+local-progress.json
