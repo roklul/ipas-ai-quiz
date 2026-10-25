@@ -2,8 +2,8 @@ import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMark
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
-const SYNC_URL = ''; // 已與原作者的雲端拆開;自架 Worker 後填入自己的網址(見 AGENTS.md),留空=純本機
-const VAPID_PUBLIC = ''; // 自架推播時填入自己的 VAPID 公鑰
+const SYNC_URL = 'https://ipas-quiz-sync.anclaw-worker.workers.dev';
+const VAPID_PUBLIC = 'BD2nacY5fbE8m29_YRwqMo0jUyWDVgi2ELGEaXTPpxElqgbwLOBGgwQDHyPRcxIEBdd9htl7nKoFSCGzLaozwkw';
 const $ = (sel) => document.querySelector(sel);
 const view = $('#view');
 
