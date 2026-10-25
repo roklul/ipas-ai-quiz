@@ -504,3 +504,126 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
     explanation: explanationText,
   };
 }
+
+// 智慧深度合併兩份進度（自洽統計快照 + 獨立屬性時間戳合併）
+export function mergeStores(target, incoming, todayStr = new Date().toISOString().slice(0, 10)) {
+  if (!incoming || !incoming.q) return target;
+  const out = structuredClone(target);
+  out.q ||= {};
+  out.cards ||= {};
+  out.history ||= {};
+  out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
+  if ((incoming.updatedAt || 0) > (out.updatedAt || 0)) {
+    out.settings = { ...(out.settings || {}), ...(incoming.settings || {}) };
+    if (incoming.syncCode) out.syncCode = incoming.syncCode;
+  }
+
+  // 1. 合併每題進度 q（以自洽統計快照與獨立屬性時間戳合併，徹底防止跨端統計矛盾與誤覆蓋）
+  for (const [qid, ip] of Object.entries(incoming.q || {})) {
+    const tp = out.q[qid];
+    if (!tp) {
+      out.q[qid] = { ...ip };
+      continue;
+    }
+
+    // A. 統計快照 (Cohesive Statistics Snapshot): 作答次數、答對、答錯、箱子屬於同一份自洽狀態，絕不跨端獨立取 max
+    let stats;
+    const tAttempts = tp.attempts || 0;
+    const iAttempts = ip.attempts || 0;
+    if (iAttempts > tAttempts) {
+      stats = ip;
+    } else if (tAttempts > iAttempts) {
+      stats = tp;
+    } else {
+      // 次數相同時，以作答時間較新者（lastAnsweredAt 或 updatedAt）之自洽快照為準
+      const tAnsTime = tp.lastAnsweredAt || tp.updatedAt || 0;
+      const iAnsTime = ip.lastAnsweredAt || ip.updatedAt || 0;
+      stats = (iAnsTime >= tAnsTime) ? ip : tp;
+    }
+
+    // B. 筆記與解題思路：依 noteUpdatedAt（或 updatedAt）較新者為準，允許清空刪除
+    const tNoteTime = tp.noteUpdatedAt || tp.updatedAt || 0;
+    const iNoteTime = ip.noteUpdatedAt || ip.updatedAt || 0;
+    const noteWinner = (iNoteTime > tNoteTime) ? ip : tp;
+
+    // C. 星標標記：依 starredUpdatedAt（或 updatedAt）較新者為準，允許取消星標
+    const tStarTime = tp.starredUpdatedAt || tp.updatedAt || 0;
+    const iStarTime = ip.starredUpdatedAt || ip.updatedAt || 0;
+    const starWinner = (iStarTime > tStarTime) ? ip : tp;
+
+    // D. 遺忘曲線排程：依 reviewUpdatedAt（或 updatedAt）較新者為準
+    const tRevTime = tp.reviewUpdatedAt || tp.updatedAt || 0;
+    const iRevTime = ip.reviewUpdatedAt || ip.updatedAt || 0;
+    const revWinner = (iRevTime > tRevTime) ? ip : tp;
+
+    // E. Notion 頁面關聯：保留既有 ID 與較新的同步時間
+    const notionPageId = tp.notionPageId || ip.notionPageId;
+    const notionSyncedAt = Math.max(tp.notionSyncedAt || 0, ip.notionSyncedAt || 0);
+
+    const mergedAttempts = Math.max(stats.attempts || 0, (stats.correct || 0) + (stats.wrong || 0));
+
+    out.q[qid] = {
+      box: stats.box || 1,
+      attempts: mergedAttempts,
+      correct: stats.correct || 0,
+      wrong: stats.wrong || 0,
+      lastAnsweredAt: stats.lastAnsweredAt || 0,
+      note: noteWinner.note || '',
+      studentAnswer: noteWinner.studentAnswer || '',
+      noteUpdatedAt: Math.max(tNoteTime, iNoteTime),
+      starred: !!starWinner.starred,
+      starredUpdatedAt: Math.max(tStarTime, iStarTime),
+      reviewStage: revWinner.reviewStage,
+      reviewDue: revWinner.reviewDue,
+      reviewUpdatedAt: Math.max(tRevTime, iRevTime),
+      notionPageId,
+      notionSyncedAt,
+      updatedAt: Math.max(tp.updatedAt || 0, ip.updatedAt || 0),
+    };
+  }
+
+  // 2. 合併心智卡排程 cards
+  for (const [cid, ic] of Object.entries(incoming.cards || {})) {
+    out.cards[cid] = { ...(ic || {}), ...(out.cards[cid] || {}) };
+  }
+
+  // 3. 合併每日歷史 history (30天趨勢與今日題數來源)
+  for (const [d, ih] of Object.entries(incoming.history || {})) {
+    const th = out.history[d];
+    if (!th) {
+      out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
+    } else {
+      out.history[d] = {
+        a: Math.max(th.a || 0, ih.a || 0),
+        c: Math.max(th.c || 0, ih.c || 0),
+      };
+    }
+  }
+
+  // 4. 確保今日題數 store.daily 與 history[todayStr] 同步不遺失
+  const t = todayStr;
+  const todayHistA = (out.history[t] && out.history[t].a) || 0;
+  const targetDailyCount = (out.daily && out.daily.date === t) ? out.daily.count : 0;
+  const incomingDailyCount = (incoming.daily && incoming.daily.date === t) ? incoming.daily.count : 0;
+  const maxTodayCount = Math.max(todayHistA, targetDailyCount, incomingDailyCount);
+  if (maxTodayCount > 0) {
+    out.daily = { date: t, count: maxTodayCount };
+    out.history[t] ||= { a: maxTodayCount, c: 0 };
+    if (out.history[t].a < maxTodayCount) out.history[t].a = maxTodayCount;
+  }
+
+  // 5. 合併連續打卡天數 streak
+  const ts = out.streak || { count: 0, lastDate: '' };
+  const is = incoming.streak || { count: 0, lastDate: '' };
+  if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
+    out.streak = { ...is };
+  }
+
+  // 6. 近期作答紀錄 recent
+  if ((!out.recent || !out.recent.length) && incoming.recent && incoming.recent.length) {
+    out.recent = incoming.recent.slice(-50);
+  }
+
+  out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
+  return out;
+}

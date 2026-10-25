@@ -205,3 +205,75 @@ assert.ok(dNeg.advice.includes('注意') || dNeg.advice.includes('否定'));
 assert.ok(!dNeg.advice.includes('思路清晰！精準掌握'));
 
 console.log('PASS (含 parseExplanationOptions & diagnoseStudentAnswer & edge cases)');
+
+// ---- 同步分歧與統計快照一致性測試 (mergeStores) ----
+import { mergeStores } from './core.js';
+
+// 測試 1：兩端各作答一次（一端答對、一端答錯），合併後絕不能出現 attempts:1, correct:1, wrong:1
+const devA_single = {
+  q: {
+    'q-div-1': { box: 2, attempts: 1, correct: 1, wrong: 0, lastAnsweredAt: 1000, updatedAt: 1000 }
+  }
+};
+const devB_single = {
+  q: {
+    'q-div-1': { box: 1, attempts: 1, correct: 0, wrong: 1, lastAnsweredAt: 2000, updatedAt: 2000 }
+  }
+};
+const mergedDivergence = mergeStores(devA_single, devB_single);
+const resQ = mergedDivergence.q['q-div-1'];
+assert.equal(resQ.attempts, 1, '作答次數應自洽為 1');
+assert.equal(resQ.correct + resQ.wrong, 1, '答對與答錯總和必須等於作答次數');
+assert.ok(!(resQ.correct === 1 && resQ.wrong === 1), '嚴禁出現 correct:1 與 wrong:1 同時存在的統計矛盾！');
+assert.equal(resQ.lastAnsweredAt, 2000, '次數相同時應採最新快照');
+
+// 測試 2：Device A 模考作答 2 次，Device B 僅 1 次但有較新筆記 -> 作答次數保持 2 次且筆記更新
+const devA_mock = {
+  q: {
+    'q-div-2': { box: 2, attempts: 2, correct: 1, wrong: 1, lastAnsweredAt: 3000, updatedAt: 3000, note: '' }
+  }
+};
+const devB_note = {
+  q: {
+    'q-div-2': { box: 1, attempts: 1, correct: 1, wrong: 0, lastAnsweredAt: 1000, updatedAt: 4000, note: '最新重點筆記', noteUpdatedAt: 4000 }
+  }
+};
+const mergedMock = mergeStores(devA_mock, devB_note);
+const resMock = mergedMock.q['q-div-2'];
+assert.equal(resMock.attempts, 2, '模考 2 次作答絕不可退回 1 次');
+assert.equal(resMock.correct, 1);
+assert.equal(resMock.wrong, 1);
+assert.equal(resMock.note, '最新重點筆記', '應保留較新筆記');
+
+// 測試 3：清空刪除筆記不會被舊資料復活
+const devA_delNote = {
+  q: {
+    'q-div-3': { attempts: 1, correct: 1, wrong: 0, note: '', noteUpdatedAt: 5000, updatedAt: 5000 }
+  }
+};
+const devB_oldNote = {
+  q: {
+    'q-div-3': { attempts: 1, correct: 1, wrong: 0, note: '舊筆記內容', noteUpdatedAt: 4000, updatedAt: 4000 }
+  }
+};
+const mergedDel = mergeStores(devB_oldNote, devA_delNote);
+assert.equal(mergedDel.q['q-div-3'].note, '', '刪除筆記絕不可被舊資料復活');
+
+// 測試 4：取消星標不會被舊資料復活
+const devA_unstar = {
+  q: {
+    'q-div-4': { attempts: 1, correct: 1, wrong: 0, starred: false, starredUpdatedAt: 5000, updatedAt: 5000 }
+  }
+};
+const devB_star = {
+  q: {
+    'q-div-4': { attempts: 1, correct: 1, wrong: 0, starred: true, starredUpdatedAt: 4000, updatedAt: 4000 }
+  }
+};
+const mergedUnstar = mergeStores(devB_star, devA_unstar);
+assert.equal(mergedUnstar.q['q-div-4'].starred, false, '取消星標絕不可被舊資料復活');
+
+console.log('PASS (含 mergeStores 統計自洽快照與同步分歧測試)');
+
+// 引入 Notion 正文原子更新、錯誤傳遞與狀態防護測試
+import './notion_sync.test.mjs';

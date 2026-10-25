@@ -7110,7 +7110,7 @@
       "round": "114年第二次",
       "subject": "科目2：大數據處理分析與應用",
       "topic": "pandas缺失值",
-      "question": "參考下圖計算各變數的遺漏值(NaN)個數結果，下列何者正確？選項 A: df.isnull().sum()；選項 B: df.isNaN().sum()；選項 C: df.isna().sum()；選項 D: df.isnan().sum()。",
+      "question": "欲計算 DataFrame 各變數的遺漏值（NaN）個數，下列選項何者正確？選項 A: df.isnull().sum()；選項 B: df.isNaN().sum()；選項 C: df.isna().sum()；選項 D: df.isnan().sum()。",
       "options": [
         "選項 D",
         "選項 B、選項 C、選項 D",

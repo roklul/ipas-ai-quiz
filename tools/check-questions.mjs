@@ -30,7 +30,7 @@ for (const x of withImg) {
 for (const f of assets) if (!used.has(f)) errors.push(`孤兒圖(沒有題目引用):assets/${f}`);
 
 // 3) 提醒:題幹提到圖、但沒掛 image(可能漏抽圖,如歷史上的 q39);非硬錯,因有少數題沒圖也能答
-const refFig = /附圖|如圖|見圖|參考圖|下圖|上圖|右圖|左圖|圖中|圖示|如下圖/;
+const refFig = /(?:附圖|見圖|參考圖|下圖|上圖|右圖|左圖|圖示|如下圖|(?<!例)如圖)/;
 for (const x of q) if (!x.image && refFig.test(x.question || '')) warns.push(`${x.id}:題幹提到圖卻沒掛 image — 確認是否漏抽圖`);
 
 // 4) 提醒:中文標點 house style 為全形,偵測「中文緊鄰半形 , ; : ? !」或「半形括號夾中文」

@@ -1,4 +1,4 @@
-import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer } from './core.js';
+import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -207,113 +207,7 @@ async function saveLocalDisk() {
   } catch {}
 }
 
-// 智慧深度合併兩份進度：取題數、歷史紀錄與作答次數較高者，避免跨日或雲端舊檔把今天的每日進度洗掉
-function mergeStores(target, incoming) {
-  if (!incoming || !incoming.q) return target;
-  const out = structuredClone(target);
-  out.q ||= {};
-  out.cards ||= {};
-  out.history ||= {};
-  out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
-  if ((incoming.updatedAt || 0) > (out.updatedAt || 0)) {
-    out.settings = { ...(out.settings || {}), ...(incoming.settings || {}) };
-    if (incoming.syncCode) out.syncCode = incoming.syncCode;
-  }
-
-  // 1. 合併每題進度 q（依據時間戳決定狀態，避免刪除筆記或取消星標被舊資料覆蓋）
-  for (const [qid, ip] of Object.entries(incoming.q || {})) {
-    const tp = out.q[qid];
-    if (!tp) {
-      out.q[qid] = { ...ip };
-    } else {
-      const iTime = ip.updatedAt || ip.lastAnsweredAt || 0;
-      const tTime = tp.updatedAt || tp.lastAnsweredAt || 0;
-      if (iTime > tTime) {
-        out.q[qid] = {
-          ...tp,
-          ...ip,
-          attempts: Math.max(tp.attempts || 0, ip.attempts || 0, (ip.correct || 0) + (ip.wrong || 0), (tp.correct || 0) + (tp.wrong || 0)),
-          correct: Math.max(tp.correct || 0, ip.correct || 0),
-          wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
-          lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
-        };
-      } else if (tTime > iTime) {
-        out.q[qid] = {
-          ...ip,
-          ...tp,
-          attempts: Math.max(tp.attempts || 0, ip.attempts || 0, (tp.correct || 0) + (tp.wrong || 0), (ip.correct || 0) + (ip.wrong || 0)),
-          correct: Math.max(tp.correct || 0, ip.correct || 0),
-          wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
-          lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
-        };
-      } else {
-        const useIncoming = (ip.attempts || 0) > (tp.attempts || 0);
-        const base = useIncoming ? ip : tp;
-        out.q[qid] = {
-          ...base,
-          attempts: Math.max(tp.attempts || 0, ip.attempts || 0, (base.correct || 0) + (base.wrong || 0)),
-          correct: base.correct || 0,
-          wrong: base.wrong || 0,
-          note: base.note !== undefined ? base.note : (tp.note || ip.note || ''),
-          studentAnswer: base.studentAnswer !== undefined ? base.studentAnswer : (tp.studentAnswer || ip.studentAnswer || ''),
-          starred: base.starred !== undefined ? base.starred : !!(tp.starred || ip.starred),
-          box: base.box || tp.box || ip.box || 1,
-          lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
-          reviewStage: base.reviewStage || tp.reviewStage || ip.reviewStage,
-          reviewDue: base.reviewDue || tp.reviewDue || ip.reviewDue,
-          notionSyncedAt: Math.max(tp.notionSyncedAt || 0, ip.notionSyncedAt || 0),
-          notionPageId: tp.notionPageId || ip.notionPageId,
-          updatedAt: Math.max(tp.updatedAt || 0, ip.updatedAt || 0),
-        };
-      }
-    }
-  }
-
-  // 2. 合併心智卡排程 cards
-  for (const [cid, ic] of Object.entries(incoming.cards || {})) {
-    out.cards[cid] = { ...(ic || {}), ...(out.cards[cid] || {}) };
-  }
-
-  // 3. 合併每日歷史 history (30天趨勢與今日題數來源)
-  for (const [d, ih] of Object.entries(incoming.history || {})) {
-    const th = out.history[d];
-    if (!th) {
-      out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
-    } else {
-      out.history[d] = {
-        a: Math.max(th.a || 0, ih.a || 0),
-        c: Math.max(th.c || 0, ih.c || 0),
-      };
-    }
-  }
-
-  // 4. 確保今日題數 store.daily 與 history[today()] 同步不遺失
-  const t = today();
-  const todayHistA = (out.history[t] && out.history[t].a) || 0;
-  const targetDailyCount = (out.daily && out.daily.date === t) ? out.daily.count : 0;
-  const incomingDailyCount = (incoming.daily && incoming.daily.date === t) ? incoming.daily.count : 0;
-  const maxTodayCount = Math.max(todayHistA, targetDailyCount, incomingDailyCount);
-  if (maxTodayCount > 0) {
-    out.daily = { date: t, count: maxTodayCount };
-    out.history[t] ||= { a: maxTodayCount, c: 0 };
-    if (out.history[t].a < maxTodayCount) out.history[t].a = maxTodayCount;
-  }
-
-  // 5. 合併連續打卡天數 streak
-  const ts = out.streak || { count: 0, lastDate: '' };
-  const is = incoming.streak || { count: 0, lastDate: '' };
-  if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
-    out.streak = { ...is };
-  }
-
-  // 6. 近期作答紀錄 recent
-  if ((!out.recent || !out.recent.length) && incoming.recent && incoming.recent.length) {
-    out.recent = incoming.recent.slice(-50);
-  }
-
-  out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
-  return out;
-}
+// mergeStores 已固化至 core.js 並導入，確保具備完整單元測試覆蓋
 
 async function pullLocalDisk() {
   if (!isLocalServer()) return false;
@@ -381,7 +275,7 @@ async function pullSync() {
   return false;
 }
 function qp(id) {
-  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', studentAnswer: '', starred: false, lastAnsweredAt: 0, updatedAt: 0 });
+  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', studentAnswer: '', starred: false, lastAnsweredAt: 0, updatedAt: 0, noteUpdatedAt: 0, starredUpdatedAt: 0, reviewUpdatedAt: 0 });
 }
 // 碼空間 40×40×9000 = 1,440 萬(舊版 10×10×90=9,000,估計已撞出上百對共用碼)
 function makeCode() {
@@ -558,28 +452,27 @@ async function syncQuestionToNotion(q, p = {}) {
 
   if (p.notionPageId) {
     try {
-      // 1. 更新頁面屬性 (properties)
+      // 1. 先更新頁面屬性 (properties)
       const res = await callNotion(`pages/${p.notionPageId}`, {
         method: 'PATCH',
         body: { properties: payload.properties },
       });
 
-      // 2. 同步更新內文區塊 (children blocks)，確保考生思路、解析與筆記完整替換
-      try {
-        const existingBlocks = await callNotion(`blocks/${p.notionPageId}/children?page_size=100`);
-        if (existingBlocks?.results?.length) {
-          for (const block of existingBlocks.results) {
-            await callNotion(`blocks/${block.id}`, { method: 'DELETE' }).catch(() => {});
-          }
-        }
-        if (payload.children?.length) {
-          await callNotion(`blocks/${p.notionPageId}/children`, {
-            method: 'PATCH',
-            body: { children: payload.children },
-          });
-        }
-      } catch (blockErr) {
-        console.warn('更新 Notion 內文區塊失敗（屬性已更新）：', blockErr);
+      // 2. 獲取既有舊區塊列表
+      const existingBlocks = await callNotion(`blocks/${p.notionPageId}/children?page_size=100`);
+      const oldBlockIds = (existingBlocks?.results || []).map((b) => b.id);
+
+      // 3. 先追加最新內文區塊（確保新內容已成功寫入，絕不預先刪除造成正文清空）
+      if (payload.children?.length) {
+        await callNotion(`blocks/${p.notionPageId}/children`, {
+          method: 'PATCH',
+          body: { children: payload.children },
+        });
+      }
+
+      // 4. 新內容確認寫入後，再刪除舊區塊（若失敗則拋出錯誤讓介面重試，但新內容已保全）
+      for (const oldId of oldBlockIds) {
+        await callNotion(`blocks/${oldId}`, { method: 'DELETE' });
       }
 
       return res;
@@ -589,7 +482,7 @@ async function syncQuestionToNotion(q, p = {}) {
       if (isNotFound) {
         delete p.notionPageId;
       } else {
-        // 暫時性錯誤（429 頻率限制、500、網路異常等）直接拋出，不降級為 POST，防止產生重複分頁！
+        // 暫時性錯誤或正文寫入失敗直接拋出，不降級為 POST，防止產生重複分頁並讓介面如實回報失敗！
         throw err;
       }
     }
@@ -1079,12 +972,20 @@ function runPractice(pool, opts = {}) {
         <div id="fb"></div>
       </section>`;
 
-    $('#star').onclick = () => { p.starred = !p.starred; p.updatedAt = Date.now(); save(); render(); };
+    $('#star').onclick = () => {
+      p.starred = !p.starred;
+      const now = Date.now();
+      p.starredUpdatedAt = now;
+      p.updatedAt = now;
+      save();
+      render();
+    };
     $('#toggle-meta-btn').onclick = () => {
       showCurrentMeta = !showCurrentMeta;
       render();
     };
     $('#review-btn').onclick = () => {
+      const now = Date.now();
       if (p.reviewDue) {
         delete p.reviewDue;
         delete p.reviewStage;
@@ -1093,7 +994,8 @@ function runPractice(pool, opts = {}) {
         p.reviewStage = next.stage;
         p.reviewDue = next.due;
       }
-      p.updatedAt = Date.now();
+      p.reviewUpdatedAt = now;
+      p.updatedAt = now;
       save();
       render();
     };
@@ -1264,13 +1166,17 @@ function runPractice(pool, opts = {}) {
     if ($('#student-answer')) {
       $('#student-answer').oninput = (e) => {
         p.studentAnswer = e.target.value;
-        p.updatedAt = Date.now();
+        const now = Date.now();
+        p.noteUpdatedAt = now;
+        p.updatedAt = now;
         save();
       };
     }
     $('#note').oninput = (e) => {
       p.note = e.target.value;
-      p.updatedAt = Date.now();
+      const now = Date.now();
+      p.noteUpdatedAt = now;
+      p.updatedAt = now;
       save();
     };
     if ($('#early-finish')) $('#early-finish').onclick = () => finish();
@@ -2618,12 +2524,19 @@ async function boot() {
   localStorage.setItem(STORE_KEY, JSON.stringify(store)); // 落地可能新生成的 syncCode(不動 updatedAt)
   await ensureFreshCode(); // 全新自動碼先查重(要在 pull 之前,否則撞碼會拉到陌生人的進度)
   if (SYNC_URL) await pullSync(); // 開啟先拉雲端，並用 mergeStores 智慧合併，絕不覆蓋掉今日進度
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      saveLocalDisk();
-      pushSync({ keepalive: true });
+  // checkpoint:切走/關頁/重整前，先儲存最新模考剩餘秒數與作答，再 flush 本機與雲端
+  const flushLatestStateBeforeExit = () => {
+    if (activeMockSessionSaver) {
+      try { activeMockSessionSaver(); } catch {}
     }
-  }); // checkpoint:切走/關頁前 flush
+    saveLocalDisk();
+    pushSync({ keepalive: true });
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) flushLatestStateBeforeExit();
+  });
+  window.addEventListener('pagehide', flushLatestStateBeforeExit);
+  window.addEventListener('beforeunload', flushLatestStateBeforeExit);
   home();
 }
 boot();
