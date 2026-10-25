@@ -760,36 +760,39 @@ function runPractice(pool, opts = {}) {
   let right = 0, wrong = 0;
   const sessionWrong = [];
   if (!pool.length) {
-    view.innerHTML = `<section class="card"><p>沒有符合的題目。</p></section>`;
-    return;
-  }
-  const render = () => {
-    const q = pool[i];
-    const p = qp(q.id);
-    const reviewStatus = formatReviewDue(p.reviewDue);
-    const reviewBtnText = p.reviewDue
-      ? (reviewStatus?.isDue ? '⏳ 今日待複習' : `⏳ ${reviewStatus?.label || '已排複習'}`)
-      : '＋ 加入複習曲線';
-    const reviewBtnClass = p.reviewDue
-      ? (reviewStatus?.isDue ? 'review-toggle-btn due' : 'review-toggle-btn on')
-      : 'review-toggle-btn';
-
     view.innerHTML = `
       <section class="card">
         <div class="row">
           <span class="muted">${i + 1} / ${pool.length}</span>
-          <div style="display:flex;gap:6px;align-items:center">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <button class="meta-toggle-btn ${hideMeta ? 'on' : ''}" id="toggle-meta-btn" title="切換顯示/隱藏考點提示（防劇透）">${hideMeta ? '👁️ 顯示考點' : '🙈 隱藏考點'}</button>
             <button class="${reviewBtnClass}" id="review-btn" title="基於艾賓浩斯遺忘曲線排程複習">${reviewBtnText}</button>
             <button class="star ${p.starred ? 'on' : ''}" id="star">${p.starred ? '★ 已標' : '☆ 標記'}</button>
           </div>
         </div>
-        <p class="qmeta muted">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>
+        ${hideMeta
+          ? `<p class="qmeta-hint" id="qmeta-hint" title="點擊顯示考點提示">🙈 考點提示已隱藏（防劇透，點此展開）</p>`
+          : `<p class="qmeta muted">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>`}
         <h3>${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
         <div id="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
         <div id="fb"></div>
       </section>`;
     $('#star').onclick = () => { p.starred = !p.starred; save(); render(); };
+    $('#toggle-meta-btn').onclick = () => {
+      store.settings ||= {};
+      store.settings.hideMeta = !store.settings.hideMeta;
+      save();
+      render();
+    };
+    if ($('#qmeta-hint')) {
+      $('#qmeta-hint').onclick = () => {
+        store.settings ||= {};
+        store.settings.hideMeta = false;
+        save();
+        render();
+      };
+    }
     $('#review-btn').onclick = () => {
       if (p.reviewDue) {
         delete p.reviewDue;
