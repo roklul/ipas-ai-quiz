@@ -202,6 +202,7 @@ function mergeStores(target, incoming) {
         wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
         note: tp.note || ip.note || '',
         studentAnswer: tp.studentAnswer || ip.studentAnswer || '',
+        lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
         starred: !!(tp.starred || ip.starred),
         reviewStage: tp.reviewStage || ip.reviewStage,
         reviewDue: tp.reviewDue || ip.reviewDue,
@@ -315,7 +316,7 @@ async function pullSync() {
   return false;
 }
 function qp(id) {
-  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', studentAnswer: '', starred: false });
+  return (store.q[id] ||= { box: 1, attempts: 0, correct: 0, wrong: 0, note: '', studentAnswer: '', starred: false, lastAnsweredAt: 0 });
 }
 // 碼空間 40×40×9000 = 1,440 萬(舊版 10×10×90=9,000,估計已撞出上百對共用碼)
 function makeCode() {
@@ -782,15 +783,115 @@ function home() {
   if ($('#home-resume-mock')) $('#home-resume-mock').onclick = mockSetup;
   $('#pr-start').onclick = () => {
     const count = +$('#pr-count').value;
+    const mode = $('#pr-mode').value;
     let pool = pickPool();
-    if ($('#pr-mode').value === 'smart') {
-      // 依優先序排（錯題→沒做過→做過未掌握→已掌握），同級隨機
-      pool = pool.map((q) => ({ q, pr: reviewPriority(store.q[q.id]), r: Math.random() }))
-        .sort((a, b) => a.pr - b.pr || a.r - b.r).map((x) => x.q);
-    } else {
-      pool = shuffle(pool);
+    if (!pool.length) {
+      alert('所選範圍目前沒有符合條件的題目！');
+      return;
     }
-    if (count) pool = pool.slice(0, count);
+
+    const now = Date.now();
+    const COOLDOWN_MS = 20 * 60 * 1000; // 20 分鐘冷卻期（避免剛做完的題目立刻又在下一輪出現）
+
+    if (mode === 'smart') {
+      // 智慧排程：解決「總感覺一直重複練一樣題目」的根本問題
+      // 1. 分流題目池
+      const activeWrong = []; // Box 1 且未在冷卻中的錯題
+      const newQuestions = []; // 從沒做過的新題
+      const reviewing = []; // Box 2 進入鞏固期且未在冷卻中的題目
+      const mastered = []; // Box 3 已掌握的題目
+      const coolingDown = []; // 剛在 20 分鐘內做過、冷卻中的題目
+
+      for (const q of pool) {
+        const p = store.q[q.id];
+        if (!p || (p.attempts || 0) === 0) {
+          newQuestions.push(q);
+        } else if (p.lastAnsweredAt && now - p.lastAnsweredAt < COOLDOWN_MS) {
+          coolingDown.push(q);
+        } else if (isMastered(p.box)) {
+          mastered.push(q);
+        } else if (p.box === 1 && p.wrong > 0) {
+          activeWrong.push(q);
+        } else {
+          reviewing.push(q);
+        }
+      }
+
+      // 如果全部題目都還在冷卻中（題目池很小），則釋放冷卻題目
+      const availableWrong = activeWrong.length ? activeWrong : coolingDown.filter(q => (store.q[q.id]?.box === 1 && store.q[q.id]?.wrong > 0));
+      const availableReview = reviewing.length ? reviewing : coolingDown.filter(q => (store.q[q.id]?.box === 2));
+
+      // 若指定題數（如 10 題、20 題、25 題）
+      if (count > 0) {
+        // 黃金配比：最多 30%~40% 錯題/複習題 + 60%~70% 新題目
+        const maxReviewCount = Math.max(1, Math.round(count * 0.35));
+
+        // 挑選複習題（錯題優先，其次鞏固題）
+        const reviewPicks = shuffle([...availableWrong, ...availableReview]).slice(0, maxReviewCount);
+        // 挑選新題
+        const newPicks = shuffle(newQuestions).slice(0, count - reviewPicks.length);
+
+        let finalPool = [...reviewPicks, ...newPicks];
+
+        // 若新題或複習題不夠填滿 count，用剩餘可用題（已掌握或冷卻題）隨機補齊
+        if (finalPool.length < count) {
+          const pickedIds = new Set(finalPool.map(q => q.id));
+          const remainingPool = shuffle(pool.filter(q => !pickedIds.has(q.id)));
+          finalPool = finalPool.concat(remainingPool.slice(0, count - finalPool.length));
+        }
+
+        pool = shuffle(finalPool);
+      } else {
+        // 全卷模式：錯題 ➔ 新題 ➔ 鞏固題 ➔ 已掌握
+        pool = [
+          ...shuffle(availableWrong),
+          ...shuffle(newQuestions),
+          ...shuffle(availableReview),
+          ...shuffle(mastered)
+        ];
+      }
+    } else if (mode === 'new') {
+      // 只練新題
+      const newQs = pool.filter(q => !store.q[q.id] || (store.q[q.id].attempts || 0) === 0);
+      if (!newQs.length) {
+        alert('恭喜！所選範圍的所有題目你都已經至少做過一次！已為你切換為複習練習。');
+        pool = shuffle(pool);
+      } else {
+        pool = shuffle(newQs);
+      }
+      if (count) pool = pool.slice(0, count);
+    } else if (mode === 'wrong') {
+      // 只練當前錯題
+      const wrongQs = pool.filter(q => {
+        const p = store.q[q.id];
+        return p && p.box < 3 && (p.wrong || 0) > 0;
+      });
+      if (!wrongQs.length) {
+        alert('所選範圍目前沒有待複習的錯題！已自動為你挑選新題目。');
+        pool = shuffle(pool);
+      } else {
+        pool = shuffle(wrongQs);
+      }
+      if (count) pool = pool.slice(0, count);
+    } else if (mode === 'ebbinghaus') {
+      // 遺忘曲線到期題
+      const dueQs = pool.filter(q => {
+        const p = store.q[q.id];
+        return p && p.reviewDue && p.reviewDue <= now;
+      });
+      if (!dueQs.length) {
+        alert('目前所選範圍沒有到期的遺忘曲線題目！已為你挑選新題與鞏固練習。');
+        pool = shuffle(pool);
+      } else {
+        pool = shuffle(dueQs);
+      }
+      if (count) pool = pool.slice(0, count);
+    } else {
+      // 完全隨機
+      pool = shuffle(pool);
+      if (count) pool = pool.slice(0, count);
+    }
+
     runPractice(pool);
   };
   $('#pr-images').onclick = () => runPractice(shuffle(DATA.questions.filter((q) => q.image)));
@@ -869,19 +970,18 @@ function runPractice(pool, opts = {}) {
   const answer = (q, k) => {
     const p = qp(q.id);
     const correct = k === q.answer;
-    p.attempts++;
+        p.attempts++;
+    p.lastAnsweredAt = Date.now();
     if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
     p.box = nextBox(p.box, correct);
 
-    let reviewUpdateMsg = '';
-    if (p.reviewDue) {
-      const next = calcNextReview(p.reviewStage || 1, correct);
-      p.reviewStage = next.stage;
-      p.reviewDue = next.due;
-      reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
-        🧠 遺忘曲線進度：第 ${next.stage} 階段（${next.days} 天後再次複習）
-      </span>`;
-    }
+    // 自動排程遺忘曲線：作答後自動推進或排程複習
+    const next = calcNextReview(p.reviewStage || (correct ? 1 : 0), correct);
+    p.reviewStage = next.stage;
+    p.reviewDue = next.due;
+    const reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
+      🧠 遺忘曲線排程：第 ${next.stage} 階段（${next.days} 天後再次複習）
+    </span>`;
 
     logRecent(correct);
     bumpDaily(correct);

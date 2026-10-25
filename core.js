@@ -12,9 +12,9 @@ export function nextBox(box, correct) {
 export function reviewPriority(p) {
   const x = p || { box: 1, attempts: 0, wrong: 0 };
   if (isMastered(x.box)) return 3;
-  if (x.wrong > 0) return 0;        // 錯過又沒掌握 → 最該練
-  if ((x.attempts || 0) === 0) return 1; // 沒做過
-  return 2;                          // 做過但還沒掌握
+  if ((x.attempts || 0) === 0) return 1; // 沒做過的新題
+  if (x.box === 1 && x.wrong > 0) return 0; // 當前錯題 (box 1)
+  return 2; // box 2 (做過且已答對 1 次，進入鞏固期)
 }
 
 export function isMastered(box) {
