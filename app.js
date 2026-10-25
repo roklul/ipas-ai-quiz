@@ -545,12 +545,67 @@ function home() {
       <p class="muted" style="margin:6px 0 0">每天 3 題（${currLv === '全部' ? '初級+中級' : currLv}），養成每日刷題的習慣。</p>
     </section>`;
   const cc = todayConcept();
-  const conceptCard = cc ? `
-    <section class="card concept-card">
-      <div class="ck">今日 AI 觀念${cc.chapter ? ' · ' + esc(cc.chapter) : ''}${cc.weak ? ' · 針對你還沒掌握的範圍' : ''}</div>
-      <h3>${esc(cc.title)}</h3>
-      <p>${esc(cc.body)}</p>
-    </section>` : '';
+  let conceptCard = '';
+  let conceptMatchedQs = [];
+  let conceptGuideCard = null;
+
+  if (cc) {
+    const cTitle = cc.title.toLowerCase();
+    // 嚴謹匹配考點心智卡
+    conceptGuideCard = (GUIDE_DATA.cards || []).find((g) => {
+      const gTitle = g.title.toLowerCase();
+      const mainWords = gTitle.split(/[ (]/)[0];
+      if (mainWords.length >= 2 && cTitle.includes(mainWords)) return true;
+      return (g.keywords || []).some((kw) => kw.length >= 2 && cTitle.includes(kw.toLowerCase()));
+    });
+
+    const kw = cc.title.split(/[ (]/)[0].toLowerCase();
+    conceptMatchedQs = DATA.questions.filter((q) => {
+      if (cc.chapter && q.chapter === cc.chapter) return true;
+      const qText = `${q.question} ${q.options.join(' ')} ${q.topic || ''}`.toLowerCase();
+      return qText.includes(kw);
+    });
+
+    const guidePdfUrl = (DATA.meta && DATA.meta.guides && DATA.meta.guides[cc.subject]) || '';
+
+    let mainDesc = cc.body || '';
+    let examTrapDesc = '';
+    const trapIdx = mainDesc.indexOf('考點：');
+    if (trapIdx !== -1) {
+      examTrapDesc = mainDesc.slice(trapIdx);
+      mainDesc = mainDesc.slice(0, trapIdx).trim();
+    }
+
+    conceptCard = `
+      <section class="card concept-card" style="border:1px solid #bfdbfe;background:linear-gradient(135deg,#f0f7ff 0%,#f8fafc 100%)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
+          <div class="ck" style="font-weight:700;color:var(--c-accent);font-size:12px">
+            💡 今日 AI 觀念${cc.chapter ? ' · ' + esc(cc.chapter) : ''}${cc.weak ? ' · 針對你還沒掌握的弱點範圍' : ''}
+          </div>
+          ${guidePdfUrl ? `<a href="${esc(guidePdfUrl)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--c-accent);text-decoration:none;font-weight:500">官方學習指引 PDF ↗</a>` : ''}
+        </div>
+        <h3 style="margin:6px 0 8px;font-size:17px;color:#1e293b">${esc(cc.title)}</h3>
+        <p style="margin:0 0 10px;font-size:14px;color:#334155;line-height:1.65">${esc(mainDesc)}</p>
+
+        <details class="concept-details" style="margin:10px 0;background:#fff;border:1px solid #dbeafe;border-radius:8px;padding:8px 12px">
+          <summary style="font-weight:600;font-size:13px;color:var(--c-accent);cursor:pointer;user-select:none;outline:none;display:flex;align-items:center;gap:6px">
+            <span>🔍 展開詳細說明、情境案例與常考陷阱</span>
+          </summary>
+          <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #cbd5e1;font-size:13px;line-height:1.65;color:#1e293b">
+            ${conceptGuideCard?.subtitle ? `<div style="font-size:14px;font-weight:700;color:#1d4ed8;margin-bottom:8px">📌 ${esc(conceptGuideCard.subtitle)}</div>` : ''}
+            ${conceptGuideCard?.function ? `<div style="margin-bottom:8px"><b>🎯 核心功能與計算意義：</b><br>${esc(conceptGuideCard.function)}</div>` : ''}
+            ${conceptGuideCard?.scenario ? `<div style="margin-bottom:8px"><b>💡 實戰生活案例與考題情境：</b><br>${esc(conceptGuideCard.scenario)}</div>` : ''}
+            ${conceptGuideCard?.trap ? `<div style="margin-bottom:8px;padding:6px 10px;background:#fef2f2;border-left:3px solid #ef4444;border-radius:4px;color:#991b1b"><b>⚠️ 常考盲點與防呆陷阱：</b><br>${esc(conceptGuideCard.trap)}</div>` : ''}
+            ${examTrapDesc ? `<div style="margin-top:8px;padding:6px 10px;background:#f8fafc;border-left:3px solid #64748b;border-radius:4px;color:#334155"><b>📝 官方評鑑考點提示：</b><br>${esc(examTrapDesc)}</div>` : ''}
+          </div>
+        </details>
+
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+          ${conceptMatchedQs.length ? `<button class="primary" id="drill-concept-qs" style="margin:0;padding:7px 14px;font-size:13px;font-weight:600">🎯 特訓此考點題目 (${conceptMatchedQs.length} 題)</button>` : ''}
+          ${conceptGuideCard ? `<button class="goto" id="goto-concept-guide" style="margin:0;padding:7px 14px;font-size:13px;background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;font-weight:600">📖 考點速查心智卡內鏈</button>` : ''}
+        </div>
+      </section>`;
+  }
 
   const dueQs = getDueQuestions();
   const dueCs = getDueCards();
@@ -714,7 +769,16 @@ function home() {
   if ($('#start-ebbinghaus')) {
     $('#start-ebbinghaus').onclick = () => runPractice(shuffle(dueQs));
   }
-
+  if ($('#drill-concept-qs')) {
+    $('#drill-concept-qs').onclick = () => runPractice(shuffle(conceptMatchedQs));
+  }
+  if ($('#goto-concept-guide')) {
+    $('#goto-concept-guide').onclick = () => {
+      guideActiveCat = '全部';
+      guideSearchKw = (conceptGuideCard?.title || cc?.title || '').split(/[ (]/)[0];
+      guide();
+    };
+  }
   if ($('#home-resume-mock')) $('#home-resume-mock').onclick = mockSetup;
   $('#pr-start').onclick = () => {
     const count = +$('#pr-count').value;
