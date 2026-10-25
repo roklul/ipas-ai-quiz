@@ -18,6 +18,28 @@ for (const x of q) {
   ids.add(x.id);
 }
 
+// 1b) 來源標示:官方與自編不可混淆(規格 FR-01)。
+//     source 缺省=歷屆公告;'學習指引'=官方範例題(id 必以 lg- 開頭);'自編模擬'=本站自編(id 為 mock-/sim- 開頭)
+const SOURCES = new Set(['學習指引', '自編模擬', 'AI種子班測驗']);
+for (const x of q) {
+  if (x.source !== undefined && !SOURCES.has(x.source)) errors.push(`${x.id}:source 不認得(${x.source});只能缺省、學習指引、自編模擬或AI種子班測驗`);
+  if (x.source === '學習指引' && !x.id.startsWith('lg-')) errors.push(`${x.id}:標成「學習指引」但 id 不是 lg-(非官方題不可冒充官方範例)`);
+  if (/^(mock|sim)-/.test(x.id) && x.source !== '自編模擬') errors.push(`${x.id}:mock-/sim- 自編題必須 source='自編模擬'`);
+  if (x.id.startsWith('seed-') && x.source !== 'AI種子班測驗') errors.push(`${x.id}:seed- 外部課程題必須 source='AI種子班測驗'`);
+  if (x.source === '自編模擬' && !/^(mock|sim)-/.test(x.id)) errors.push(`${x.id}:source='自編模擬' 但 id 不是 mock-/sim- 開頭`);
+}
+// 1c) 提醒:同一批自編題的正解位置嚴重偏斜(猜題偏差,sim-l1 曾 135/60/4/1)
+{
+  const groups = {};
+  for (const x of q) if (/^(mock|sim)-/.test(x.id)) (groups[x.id.split('-').slice(0, 2).join('-').replace(/d+$/, '')] ||= []).push(x);
+  for (const [g, arr] of Object.entries(groups)) {
+    if (arr.length < 50) continue;
+    const cnt = [0, 0, 0, 0]; arr.forEach((x) => cnt[x.answer]++);
+    const top = Math.max(...cnt) / arr.length;
+    if (top > 0.5) warns.push(`自編題 ${g}* 共 ${arr.length} 題,正解位置 A/B/C/D=${cnt.join('/')}(單一位置 ${Math.round(top * 100)}%),易被猜中`);
+  }
+}
+
 // 2) 圖片:壞圖 / 檔名慣例(image 必須 = assets/<id>.png)/ 孤兒圖
 const withImg = q.filter((x) => x.image);
 const used = new Set();

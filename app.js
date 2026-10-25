@@ -509,6 +509,9 @@ function setNav(active) {
 // 範圍 = 章節（若題目尚未分類則退回科目），供「選擇練習範圍」用
 const rangeKey = (q) => q.chapter || q.subject;
 const srcOf = (q) => q.source || '歷屆';
+// 自編模擬題的答案與解析未經官方驗證，題卡上一律明示，不與官方題混淆
+const OFFICIAL_SRC = ['歷屆', '學習指引'];
+const srcBadge = (q) => (OFFICIAL_SRC.includes(srcOf(q)) ? '' : `<p style="margin:0 0 6px"><span class="src-tag" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa">${srcOf(q) === 'AI種子班測驗' ? '外部課程題' : '自編模擬題'}・非官方・答案僅供參考</span></p>`);
 function rangeGroups() {
   const m = new Map();
   for (const q of DATA.questions) {
@@ -692,9 +695,11 @@ function home() {
       </label>
       <label>來源
         <select id="pr-source">
-          <option value="">全部（歷屆 + 學習指引）</option>
+          <option value="">全部（含非官方題）</option>
           <option value="歷屆">只練歷屆考古題</option>
           <option value="學習指引">只練學習指引範例</option>
+          <option value="自編模擬">只練自編模擬題（非官方）</option>
+          <option value="AI種子班測驗">只練外部課程題（非官方）</option>
         </select>
       </label>
       <button class="primary" id="pr-start">開始練習</button>
@@ -972,6 +977,7 @@ function runPractice(pool, opts = {}) {
             ? `<p class="qmeta muted" style="margin:8px 0 0;padding:8px 12px;background:#f8fafc;border-radius:8px;border-left:3px solid var(--c-accent);font-size:13px;line-height:1.5">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>`
             : ''}
         </div>
+        ${srcBadge(q)}
         <h3>${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
         <div id="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
