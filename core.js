@@ -505,6 +505,51 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
   };
 }
 
+// 確保舊版歷史統計平滑過渡 (P1)：若已有舊版作答次數且尚無 logs，將既有作答數遷移為基準 event logs
+export function ensureQuestionLogs(p, qid) {
+  if (!p) return;
+  p.logs ||= [];
+  if (p.logs.length === 0 && (p.attempts || 0) > 0) {
+    const baseTime = p.lastAnsweredAt || p.updatedAt || 1000;
+    const cCount = p.correct || 0;
+    const wCount = p.wrong || 0;
+    const total = p.attempts || (cCount + wCount);
+    for (let i = 0; i < cCount; i++) {
+      p.logs.push({ id: `legacy_${qid}_c_${i}`, t: baseTime, c: true });
+    }
+    for (let i = 0; i < wCount; i++) {
+      p.logs.push({ id: `legacy_${qid}_w_${i}`, t: baseTime, c: false });
+    }
+    for (let i = p.logs.length; i < total; i++) {
+      p.logs.push({ id: `legacy_${qid}_u_${i}`, t: baseTime, c: false });
+    }
+  }
+}
+
+// 辨識系統自動產生之區塊，保守保留考生自行在 Notion 頁面內新增的內容 (FR-07, AC-09)
+export function isSystemManagedBlock(b, q = {}) {
+  if (!b || !b.type) return false;
+  const content = (b[b.type]?.rich_text || [])
+    .map((t) => t.plain_text || t.text?.content || '')
+    .join('');
+
+  if (b.type === 'callout') {
+    if (content.includes('考點與關鍵字') || b.callout?.icon?.emoji === '💡') return true;
+  }
+  if (b.type === 'heading_3') {
+    if (content.includes('【題目】') || content.includes('題目')) return true;
+  }
+  if (b.type === 'toggle') {
+    if (content.includes('點擊查看答案') || content.includes('解析') || content.includes('AI 檢查')) return true;
+  }
+  if (b.type === 'paragraph') {
+    const qStem = (q.question || '').slice(0, 15);
+    if (qStem && content.includes(qStem)) return true;
+    if (/^[A-D]\.\s/.test(content.trim())) return true;
+  }
+  return false;
+}
+
 // 智慧深度合併兩份進度（唯一作答事件去重 + 自洽統計快照 + 獨立屬性時間戳 + 重設版本隔離）
 export function mergeStores(target, incoming, todayStr = new Date().toISOString().slice(0, 10)) {
   if (!incoming || !incoming.q) return target;
@@ -514,7 +559,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
   out.history ||= {};
   out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
 
-  // 重設版本隔離 (AC-08): 取兩端較新之重設時間戳，早於重設點之作答紀錄一律不計入
+  // 重設版本隔離 (AC-08): 取兩端較新之重設時間戳
   const resetAt = Math.max(target.statsResetAt || 0, incoming.statsResetAt || 0);
   if (resetAt > 0) out.statsResetAt = resetAt;
 
@@ -523,21 +568,63 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     if (incoming.syncCode) out.syncCode = incoming.syncCode;
   }
 
-  // 1. 合併每題進度 q
-  for (const [qid, ip] of Object.entries(incoming.q || {})) {
-    const tp = out.q[qid];
-    if (!tp) {
-      // 處理全新題目，若進來之紀錄早於重設點，統計歸零
-      const item = structuredClone(ip);
-      const itemLogs = (item.logs || []).filter((l) => l && l.id && (l.t || 0) > resetAt);
-      if (item.logs || resetAt > 0) {
-        item.logs = itemLogs;
-        item.attempts = itemLogs.length;
-        item.correct = itemLogs.filter((l) => l.c).length;
-        item.wrong = itemLogs.filter((l) => !l.c).length;
-        item.lastAnsweredAt = itemLogs.length ? itemLogs[itemLogs.length - 1].t : 0;
+  // 1. 合併每題進度 q：同時遍歷 target 與 incoming 之所有題目 (兩端全集)，杜絕遠端重設刪除之題目被復活
+  const allQids = new Set([...Object.keys(target.q || {}), ...Object.keys(incoming.q || {})]);
+  out.q = {};
+
+  for (const qid of allQids) {
+    const rawTp = target.q ? target.q[qid] : null;
+    const rawIp = incoming.q ? incoming.q[qid] : null;
+
+    let tp = rawTp ? structuredClone(rawTp) : null;
+    let ip = rawIp ? structuredClone(rawIp) : null;
+
+    // 若有重設時間戳，對早於重設點之歷史紀錄進行過濾隔離
+    if (resetAt > 0) {
+      if (tp) {
+        tp.logs = (tp.logs || []).filter((l) => l && l.id && (l.t || 0) > resetAt);
+        if ((tp.lastAnsweredAt || tp.updatedAt || 0) <= resetAt && (!tp.logs || !tp.logs.length)) {
+          tp.attempts = 0;
+          tp.correct = 0;
+          tp.wrong = 0;
+          tp.lastAnsweredAt = 0;
+          tp.box = 1;
+        }
       }
-      out.q[qid] = item;
+      if (ip) {
+        ip.logs = (ip.logs || []).filter((l) => l && l.id && (l.t || 0) > resetAt);
+        if ((ip.lastAnsweredAt || ip.updatedAt || 0) <= resetAt && (!ip.logs || !ip.logs.length)) {
+          ip.attempts = 0;
+          ip.correct = 0;
+          ip.wrong = 0;
+          ip.lastAnsweredAt = 0;
+          ip.box = 1;
+        }
+      }
+
+      // 檢查此題目在重設後是否具備保留意義（有筆記、思路、星標或重設後新作答）
+      const hasNote = (tp && tp.note) || (ip && ip.note);
+      const hasStudentAnswer = (tp && tp.studentAnswer) || (ip && ip.studentAnswer);
+      const hasStarred = (tp && tp.starred) || (ip && ip.starred);
+      const hasPostResetLogs = (tp && tp.logs && tp.logs.length > 0) || (ip && ip.logs && ip.logs.length > 0);
+      const hasPostResetAns = (tp && tp.lastAnsweredAt > resetAt) || (ip && ip.lastAnsweredAt > resetAt);
+
+      if (!hasNote && !hasStudentAnswer && !hasStarred && !hasPostResetLogs && !hasPostResetAns) {
+        // 此題在重設時已刪除，且無保留內容或新作答，嚴禁復活！
+        continue;
+      }
+    }
+
+    // 若無 reset 影響但有舊版作答，確保平滑遷移 logs
+    if (tp && tp.attempts > 0 && (!tp.logs || !tp.logs.length)) ensureQuestionLogs(tp, qid);
+    if (ip && ip.attempts > 0 && (!ip.logs || !ip.logs.length)) ensureQuestionLogs(ip, qid);
+
+    if (!tp) {
+      out.q[qid] = ip;
+      continue;
+    }
+    if (!ip) {
+      out.q[qid] = tp;
       continue;
     }
 
@@ -602,8 +689,9 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     const revWinner = (iRevTime > tRevTime) ? ip : tp;
 
     // E. Notion 頁面關聯與管理區塊 ID
-    const notionPageId = tp.notionPageId || ip.notionPageId;
-    const notionBlockIds = tp.notionBlockIds || ip.notionBlockIds || [];
+    const notionDbId = revWinner.notionDbId || ip.notionDbId || tp.notionDbId;
+    const notionPageId = revWinner.notionPageId || ip.notionPageId || tp.notionPageId;
+    const notionBlockIds = revWinner.notionBlockIds || ip.notionBlockIds || tp.notionBlockIds || [];
     const notionSyncedAt = Math.max(tp.notionSyncedAt || 0, ip.notionSyncedAt || 0);
 
     out.q[qid] = {
@@ -621,6 +709,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
       reviewStage: revWinner.reviewStage,
       reviewDue: revWinner.reviewDue,
       reviewUpdatedAt: Math.max(tRevTime, iRevTime),
+      notionDbId,
       notionPageId,
       notionBlockIds,
       notionSyncedAt,
@@ -633,20 +722,41 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     out.cards[cid] = { ...(ic || {}), ...(out.cards[cid] || {}) };
   }
 
-  // 3. 合併每日歷史 history
-  for (const [d, ih] of Object.entries(incoming.history || {})) {
-    const th = out.history[d];
-    if (!th) {
-      out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
+  // 3. 合併每日歷史 history (套用重設隔離，舊統計不復活)
+  if (resetAt > 0) {
+    if ((incoming.statsResetAt || 0) === resetAt && (target.statsResetAt || 0) < resetAt) {
+      out.history = { ...(incoming.history || {}) };
+    } else if ((target.statsResetAt || 0) === resetAt && (incoming.statsResetAt || 0) < resetAt) {
+      out.history = { ...(target.history || {}) };
     } else {
-      out.history[d] = {
-        a: Math.max(th.a || 0, ih.a || 0),
-        c: Math.max(th.c || 0, ih.c || 0),
-      };
+      // 兩端同版本重設
+      for (const [d, ih] of Object.entries(incoming.history || {})) {
+        const th = out.history[d];
+        if (!th) {
+          out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
+        } else {
+          out.history[d] = {
+            a: Math.max(th.a || 0, ih.a || 0),
+            c: Math.max(th.c || 0, ih.c || 0),
+          };
+        }
+      }
+    }
+  } else {
+    for (const [d, ih] of Object.entries(incoming.history || {})) {
+      const th = out.history[d];
+      if (!th) {
+        out.history[d] = { a: ih.a || 0, c: ih.c || 0 };
+      } else {
+        out.history[d] = {
+          a: Math.max(th.a || 0, ih.a || 0),
+          c: Math.max(th.c || 0, ih.c || 0),
+        };
+      }
     }
   }
 
-  // 4. 確保今日題數 store.daily 與 history[todayStr] 同步不遺失
+  // 4. 今日題數 store.daily 與 history[todayStr] 同步
   const t = todayStr;
   const todayHistA = (out.history[t] && out.history[t].a) || 0;
   const targetDailyCount = (out.daily && out.daily.date === t) ? out.daily.count : 0;
@@ -656,29 +766,53 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     out.daily = { date: t, count: maxTodayCount };
     out.history[t] ||= { a: maxTodayCount, c: 0 };
     if (out.history[t].a < maxTodayCount) out.history[t].a = maxTodayCount;
+  } else if (resetAt > 0) {
+    out.daily = null;
   }
 
-  // 5. 連續打卡天數 streak
-  const ts = out.streak || { count: 0, lastDate: '' };
-  const is = incoming.streak || { count: 0, lastDate: '' };
-  if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
-    out.streak = { ...is };
+  // 5. 連續打卡天數 streak (若其中一端在 resetAt 後尚未練習，不復活舊 streak)
+  if (resetAt > 0) {
+    if ((incoming.statsResetAt || 0) === resetAt && (target.statsResetAt || 0) < resetAt) {
+      out.streak = incoming.streak || { count: 0, lastDate: '' };
+    } else if ((target.statsResetAt || 0) === resetAt && (incoming.statsResetAt || 0) < resetAt) {
+      out.streak = target.streak || { count: 0, lastDate: '' };
+    } else {
+      const ts = out.streak || { count: 0, lastDate: '' };
+      const is = incoming.streak || { count: 0, lastDate: '' };
+      if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
+        out.streak = { ...is };
+      }
+    }
+  } else {
+    const ts = out.streak || { count: 0, lastDate: '' };
+    const is = incoming.streak || { count: 0, lastDate: '' };
+    if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
+      out.streak = { ...is };
+    }
   }
 
-  // 6. 近期作答紀錄 recent
-  if ((!out.recent || !out.recent.length) && incoming.recent && incoming.recent.length) {
-    out.recent = incoming.recent.slice(-50);
+  // 6. 近期作答紀錄 recent (過濾 resetAt 以前之紀錄)
+  let candidateRecent = (out.recent && out.recent.length) ? out.recent : (incoming.recent || []);
+  if (resetAt > 0) {
+    candidateRecent = candidateRecent.filter((r) => ((r.t || r.timestamp || 0) > resetAt));
   }
+  out.recent = candidateRecent.slice(-50);
 
   out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
   return out;
 }
 
-// 具備錯誤隔離、內容保護、分頁處理與考生自訂內容防刪的 Notion 同步函式 (FR-07, AC-09, AC-10)
+// 具備錯誤隔離、內容保護、分頁處理、重試防重複與資料庫隔離的 Notion 同步函式 (FR-07, AC-09, AC-10)
 export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchDbSchema = null }) {
   if (!dbId) throw new Error('尚未設定 Database ID');
-  const schema = fetchDbSchema ? await fetchDbSchema().catch(() => null) : null;
+  const schema = fetchDbSchema ? await fetchDbSchema(dbId).catch(() => null) : null;
   const payload = buildNotionPagePayload(q, p, dbId, schema);
+
+  // 依資料庫隔離 (AC-09): 若題目曾同步至其他資料庫，更換資料庫時不可覆寫原資料庫頁面
+  if (p.notionPageId && p.notionDbId && p.notionDbId !== dbId) {
+    delete p.notionPageId;
+    delete p.notionBlockIds;
+  }
 
   if (p.notionPageId) {
     let pageUpdated = false;
@@ -689,6 +823,7 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
         body: { properties: payload.properties },
       });
       pageUpdated = true;
+      p.notionDbId = dbId;
     } catch (pageErr) {
       // 僅在頁面本身明確 404 (object_not_found) 時，重設 ID 降級為重新建立頁面
       const isNotFound = pageErr.status === 404 || pageErr.code === 'object_not_found' || /not_found/i.test(pageErr.message || '');
@@ -703,12 +838,11 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
 
     if (pageUpdated) {
       // 2. 決定需要管理的系統舊區塊 ID 清單
-      // 僅管理系統產生的區塊 (p.notionBlockIds)，絕不刪除考生自行在頁面內新增的個人內容
       let oldManagedBlockIds = [];
       if (Array.isArray(p.notionBlockIds)) {
         oldManagedBlockIds = [...p.notionBlockIds];
       } else {
-        // 舊版資料未記錄 notionBlockIds 時才退回讀取全頁區塊（支援完整分頁）
+        // 舊版資料未記錄 notionBlockIds 時：分頁讀取全頁區塊，並保守辨識系統區塊，絕不刪除考生內容 (FR-07)
         let cursor = undefined;
         let allPageBlocks = [];
         do {
@@ -717,7 +851,8 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
           allPageBlocks.push(...(pageRes?.results || []));
           cursor = pageRes?.has_more ? pageRes.next_cursor : undefined;
         } while (cursor);
-        oldManagedBlockIds = allPageBlocks.map((b) => b.id);
+
+        oldManagedBlockIds = allPageBlocks.filter((b) => isSystemManagedBlock(b, q)).map((b) => b.id);
       }
 
       // 3. 先追加最新內文區塊（確保新內容已成功寫入，絕不預先刪除造成正文清空）
@@ -728,23 +863,28 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
           body: { children: payload.children },
         });
         newBlockIds = (appendRes?.results || []).map((b) => b.id);
-        p.notionBlockIds = newBlockIds;
+        // 合併新舊區塊清單進行持續追蹤；若刪舊失敗，未刪除的舊 ID 絕不遺失，下次重試會繼續清理！
+        p.notionBlockIds = [...new Set([...oldManagedBlockIds, ...newBlockIds])];
       }
 
-      // 4. 新內容確認寫入後，再刪除系統舊管理區塊
+      // 4. 新內容確認寫入後，逐一刪除舊管理區塊
       for (const oldId of oldManagedBlockIds) {
         try {
           await callNotion(`blocks/${oldId}`, { method: 'DELETE' });
+          p.notionBlockIds = (p.notionBlockIds || []).filter((id) => id !== oldId);
         } catch (blockErr) {
-          // 區塊 404 代表該區塊已在 Notion 刪除或不存在，視為已刪除，絕不因此重設 notionPageId！
+          // 區塊 404 代表該區塊已在 Notion 刪除或不存在，視為已刪除
           if (blockErr.status === 404 || blockErr.code === 'object_not_found') {
+            p.notionBlockIds = (p.notionBlockIds || []).filter((id) => id !== oldId);
             continue;
           }
-          // 其他區塊錯誤（如 500、網路中斷）向上拋出以如實告知失敗
+          // 刪除失敗時中斷拋出，此時 p.notionBlockIds 仍保留未完成刪除之舊 ID 與新 ID！
           throw blockErr;
         }
       }
 
+      p.notionBlockIds = newBlockIds;
+      p.notionDbId = dbId;
       return { id: p.notionPageId, properties: payload.properties };
     }
   }
@@ -753,6 +893,7 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
   const result = await callNotion('pages', { method: 'POST', body: payload });
   if (result && result.id) {
     p.notionPageId = result.id;
+    p.notionDbId = dbId;
     p.notionBlockIds = [];
     if (payload.children?.length) {
       try {

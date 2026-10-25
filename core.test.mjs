@@ -254,7 +254,7 @@ assert.equal(mergedRepeatedB.q['q-ac07'].attempts, 2, 'AC-07: 再次與 B 同步
 assert.equal(mergedRepeatedB.q['q-ac07'].correct, 1);
 assert.equal(mergedRepeatedB.q['q-ac07'].wrong, 1);
 
-// 測試 1-B (舊版無 logs 相容)：兩端各作答一次，舊快照自洽取最新，絕不各取 max 產生 1, 1, 1 矛盾
+// 測試 1-B (舊版無 logs 相容)：兩端各作答一次，透過 ensureQuestionLogs 遷移後兩端唯一作答皆保留，絕不產生 1, 1, 1 矛盾
 const devA_legacy = {
   q: {
     'q-div-legacy': { box: 2, attempts: 1, correct: 1, wrong: 0, lastAnsweredAt: 1000, updatedAt: 1000 }
@@ -267,9 +267,11 @@ const devB_legacy = {
 };
 const mergedLegacy = mergeStores(devA_legacy, devB_legacy);
 const resLeg = mergedLegacy.q['q-div-legacy'];
-assert.equal(resLeg.attempts, 1, '舊格式作答次數應自洽為 1');
-assert.equal(resLeg.correct + resLeg.wrong, 1, '答對與答錯總和必須等於作答次數');
-assert.ok(!(resLeg.correct === 1 && resLeg.wrong === 1), '嚴禁出現 correct:1 與 wrong:1 同時存在的統計矛盾！');
+assert.equal(resLeg.attempts, 2, '舊格式合併後亦保留兩端各自作答，attempts 為 2');
+assert.equal(resLeg.correct, 1);
+assert.equal(resLeg.wrong, 1);
+assert.equal(resLeg.correct + resLeg.wrong, 2, '答對與答錯總和必須等於作答次數');
+assert.ok(!(resLeg.attempts === 1 && resLeg.correct === 1 && resLeg.wrong === 1), '嚴禁出現 correct:1 與 wrong:1 且 attempts:1 同時存在的統計矛盾！');
 
 // 測試 2：Device A 模考作答 2 次，Device B 僅 1 次但有較新筆記 -> 作答次數保持 2 次且筆記更新
 const devA_mock = {
@@ -376,7 +378,72 @@ assert.equal(resReset.studentAnswer, '重設後保留的思路', 'AC-08: 考生�
 assert.equal(resReset.starred, true, 'AC-08: 星標完整保留');
 assert.equal(mergedReset.statsResetAt, 5000, 'AC-08: statsResetAt 戳記保留');
 
-console.log('PASS (含 mergeStores 統計自洽快照與同步分歧測試)');
+// 測試 6 (P1)：舊版紀錄升級後首次作答平滑過渡（舊版已有 10 次作答，再答一次應保留 11 次）
+import { ensureQuestionLogs } from './core.js';
+const p_legacy = { box: 2, attempts: 10, correct: 8, wrong: 2, updatedAt: 2000, lastAnsweredAt: 2000 };
+ensureQuestionLogs(p_legacy, 'q-legacy-10');
+assert.equal(p_legacy.logs.length, 10, '遷移後應平滑補齊 10 筆基準 logs');
+
+// 考生新答對一次
+const newLogTime = 3000;
+p_legacy.logs.push({ id: `q-legacy-10_${newLogTime}_rand1`, t: newLogTime, c: true });
+p_legacy.attempts = p_legacy.logs.length;
+p_legacy.correct++;
+p_legacy.lastAnsweredAt = newLogTime;
+p_legacy.updatedAt = newLogTime;
+
+assert.equal(p_legacy.attempts, 11, '舊版已有 10 次作答，再答一次應保留 11 次');
+assert.equal(p_legacy.correct, 9, '答對次數應自洽增加為 9');
+assert.equal(p_legacy.wrong, 2, '答錯次數維持 2');
+assert.equal(p_legacy.correct + p_legacy.wrong, 11, '答對與答錯總和等於作答次數');
+
+// 與另一台未作答此題的舊裝置合併
+const devA_updated = { q: { 'q-legacy-10': p_legacy } };
+const devB_legacy_store = { q: { 'q-legacy-10': { box: 2, attempts: 10, correct: 8, wrong: 2, updatedAt: 2000, lastAnsweredAt: 2000 } } };
+const mergedLegacyUpdated = mergeStores(devB_legacy_store, devA_updated);
+const resLegUp = mergedLegacyUpdated.q['q-legacy-10'];
+assert.equal(resLegUp.attempts, 11, '合併後應完整保留 11 次作答歷史，絕不丟失舊資料');
+assert.equal(resLegUp.correct, 9);
+assert.equal(resLegUp.wrong, 2);
+
+// 測試 7 (P1, AC-08)：重設隔離完整性，遠端重設刪除題目及衍生統計（history/recent/daily/streak）絕不可被本機舊資料復活
+const devA_remoteReset = {
+  statsResetAt: 5000,
+  updatedAt: 5000,
+  q: {}, // 題目無筆記星標，在重設時已刪除
+  history: {},
+  recent: [],
+  daily: null,
+  streak: { count: 0, lastDate: '' },
+};
+const devB_localOld = {
+  statsResetAt: 0,
+  updatedAt: 4000,
+  q: {
+    'q-old-deleted': { attempts: 10, correct: 8, wrong: 2, box: 2, updatedAt: 4000, lastAnsweredAt: 4000 },
+  },
+  history: { '2026-10-24': { a: 10, c: 8 } },
+  recent: [{ t: 3000, c: true }],
+  daily: { date: '2026-10-24', count: 10 },
+  streak: { count: 5, lastDate: '2026-10-24' },
+};
+
+const mergedWithReset1 = mergeStores(devB_localOld, devA_remoteReset);
+assert.equal(mergedWithReset1.q['q-old-deleted'], undefined, '遠端重設刪除之題目絕不可被本機舊資料復活');
+assert.deepEqual(mergedWithReset1.history, {}, '舊 history 絕不可被舊備份復活');
+assert.deepEqual(mergedWithReset1.recent, [], '舊 recent 絕不可被舊備份復活');
+assert.equal(mergedWithReset1.daily, null, '舊 daily 絕不可被舊備份復活');
+assert.equal(mergedWithReset1.streak.count, 0, '舊 streak 絕不可被舊備份復活');
+
+// 逆向合併測試
+const mergedWithReset2 = mergeStores(devA_remoteReset, devB_localOld);
+assert.equal(mergedWithReset2.q['q-old-deleted'], undefined, '逆向合併時已刪題目亦不可復活');
+assert.deepEqual(mergedWithReset2.history, {});
+assert.deepEqual(mergedWithReset2.recent, []);
+assert.equal(mergedWithReset2.daily, null);
+assert.equal(mergedWithReset2.streak.count, 0);
+
+console.log('PASS (含 mergeStores 統計自洽快照、舊版遷移與重設全隔離測試)');
 
 // 引入 Notion 正文原子更新、錯誤傳遞與狀態防護測試
 import './notion_sync.test.mjs';

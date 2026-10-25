@@ -1,4 +1,4 @@
-import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
+import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -434,13 +434,14 @@ async function callNotion(endpoint, { method = 'GET', body = null } = {}) {
   return data;
 }
 
-let cachedDbSchema = null;
-async function fetchDbSchema() {
-  if (cachedDbSchema) return cachedDbSchema;
+const cachedDbSchemas = new Map();
+async function fetchDbSchema(targetDbId = null) {
   const { dbId } = getNotionConfig();
-  if (!dbId) throw new Error('尚未設定 Database ID');
-  const db = await callNotion(`databases/${dbId}`);
-  cachedDbSchema = db;
+  const currentDbId = targetDbId || dbId;
+  if (!currentDbId) throw new Error('尚未設定 Database ID');
+  if (cachedDbSchemas.has(currentDbId)) return cachedDbSchemas.get(currentDbId);
+  const db = await callNotion(`databases/${currentDbId}`);
+  cachedDbSchemas.set(currentDbId, db);
   return db;
 }
 
@@ -965,12 +966,12 @@ function runPractice(pool, opts = {}) {
     const p = qp(q.id);
     const correct = k === q.answer;
     const now = Date.now();
+    ensureQuestionLogs(p, q.id);
     const logEntry = {
       id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
       t: now,
       c: correct,
     };
-    p.logs ||= [];
     p.logs.push(logEntry);
     p.attempts = p.logs.length;
     p.lastAnsweredAt = now;
@@ -1739,12 +1740,12 @@ function runMock(pool, mins, existingSession = null) {
       if (answers[idx] === null) return;
       const p = qp(q.id);
       const correct = answers[idx] === q.answer;
+      ensureQuestionLogs(p, q.id);
       const logEntry = {
         id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
         t: now,
         c: correct,
       };
-      p.logs ||= [];
       p.logs.push(logEntry);
       p.attempts = p.logs.length;
       if (correct) p.correct++; else p.wrong++;
@@ -2385,7 +2386,7 @@ function settings() {
     const msg = $('#notion-cfg-msg');
     msg.textContent = '測試連線中…';
     try {
-      cachedDbSchema = null;
+      cachedDbSchemas.clear();
       const db = await fetchDbSchema();
       const title = db.title?.[0]?.plain_text || '資料庫';
       msg.textContent = `✓ 連線成功！已連接 Notion 資料庫「${title}」`;

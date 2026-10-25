@@ -60,13 +60,13 @@ function createMockNotionServer() {
         if (pageId === 'page-paginated') {
           if (!endpoint.includes('start_cursor=')) {
             return {
-              results: children.slice(0, 2).map((id) => ({ id })),
+              results: children.slice(0, 2).map((id) => ({ id, ...blocks.get(id) })),
               has_more: true,
               next_cursor: 'cursor-page-2',
             };
           } else if (endpoint.includes('start_cursor=cursor-page-2')) {
             return {
-              results: children.slice(2).map((id) => ({ id })),
+              results: children.slice(2).map((id) => ({ id, ...blocks.get(id) })),
               has_more: false,
               next_cursor: null,
             };
@@ -75,7 +75,7 @@ function createMockNotionServer() {
       }
 
       return {
-        results: children.map((id) => ({ id })),
+        results: children.map((id) => ({ id, ...blocks.get(id) })),
         has_more: false,
         next_cursor: null,
       };
@@ -237,10 +237,10 @@ const sampleQ = {
   const mock = createMockNotionServer();
   const pageId = 'page-paginated';
   mock.pages.set(pageId, { id: pageId, properties: {} });
-  // 加入 4 個區塊，createMockNotionServer 會在第一頁回傳前 2 個 + cursor，第二頁回傳後 2 個
+  // 加入 4 個系統區塊，createMockNotionServer 會在第一頁回傳前 2 個 + cursor，第二頁回傳後 2 個
   const b1 = 'b-page1-1', b2 = 'b-page1-2', b3 = 'b-page2-1', b4 = 'b-page2-2';
   for (const bid of [b1, b2, b3, b4]) {
-    mock.blocks.set(bid, { id: bid, parentId: pageId });
+    mock.blocks.set(bid, { id: bid, parentId: pageId, type: 'callout', callout: { icon: { emoji: '💡' }, rich_text: [{ plain_text: '考點與關鍵字' }] } });
   }
   mock.pageChildren.set(pageId, [b1, b2, b3, b4]);
 
@@ -277,6 +277,92 @@ const sampleQ = {
   }
   assert.equal(threw, true, '429 必須向外拋出錯誤');
   assert.equal(p.notionPageId, 'page-rate-limited', '429 絕不可清除 notionPageId');
+}
+
+// 案例 9：舊版頁面遷移保守保留考生內容 (FR-07)：若未記錄 notionBlockIds，只替換辨識出的系統區塊，考生新增之引用、代辦等內容絕不刪除
+{
+  const mock = createMockNotionServer();
+  const pageId = 'page-legacy-migration';
+  mock.pages.set(pageId, { id: pageId, properties: {} });
+
+  // 模擬舊版建立的系統區塊
+  const sys1 = 'b-sys-callout', sys2 = 'b-sys-heading', sys3 = 'b-sys-toggle';
+  mock.blocks.set(sys1, { id: sys1, parentId: pageId, type: 'callout', callout: { icon: { emoji: '💡' }, rich_text: [{ plain_text: '考點與關鍵字：機器學習' }] } });
+  mock.blocks.set(sys2, { id: sys2, parentId: pageId, type: 'heading_3', heading_3: { rich_text: [{ plain_text: '【題目】' }] } });
+  mock.blocks.set(sys3, { id: sys3, parentId: pageId, type: 'toggle', toggle: { rich_text: [{ plain_text: '▶️ 點擊查看答案、考生回答與 AI 檢查解析' }] } });
+
+  // 模擬考生在 Notion 頁面內自行添加的個人內容區塊
+  const userQuote = 'b-user-quote', userTodo = 'b-user-todo';
+  mock.blocks.set(userQuote, { id: userQuote, parentId: pageId, type: 'quote', quote: { rich_text: [{ plain_text: '考生自己加的心得重點' }] } });
+  mock.blocks.set(userTodo, { id: userTodo, parentId: pageId, type: 'to_do', to_do: { rich_text: [{ plain_text: '考前要再看一次這題' }] } });
+
+  mock.pageChildren.set(pageId, [sys1, sys2, sys3, userQuote, userTodo]);
+
+  // 題目物件進度無 notionBlockIds（舊版進度資料）
+  const p = { notionPageId: pageId, box: 2, note: '更新筆記' };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+
+  // 驗證舊系統區塊被替換，但考生內容完整保留
+  assert.equal(mock.blocks.has(sys1), false, '舊系統 callout 應被清理');
+  assert.equal(mock.blocks.has(sys2), false, '舊系統 heading 應被清理');
+  assert.equal(mock.blocks.has(sys3), false, '舊系統 toggle 應被清理');
+  assert.ok(mock.blocks.has(userQuote), '考生個人 quote 絕不能被刪除！');
+  assert.ok(mock.blocks.has(userTodo), '考生個人 to_do 絕不能被刪除！');
+}
+
+// 案例 10：刪舊失敗後重試防重複 (AC-10)：第一次刪舊區塊失敗拋出異常，未刪舊 ID 必須保留追蹤，重試成功後頁面不得殘留重複舊內容
+{
+  const mock = createMockNotionServer();
+  const p = { box: 1, note: '初始版' };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+  const pageId = p.notionPageId;
+  const initialBlocks = [...mock.pageChildren.get(pageId)];
+
+  // 模擬後續刪除舊區塊時網路中斷 (500)
+  mock.setFailBlockDelete(true);
+  p.note = '更新但刪除舊區塊會失敗';
+  let threw = false;
+  try {
+    await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+  } catch (err) {
+    threw = true;
+    assert.equal(err.status, 500);
+  }
+  assert.equal(threw, true, '刪除舊區塊失敗時必須拋出異常回報');
+  // 驗證未刪除之舊區塊 ID 仍保留在 p.notionBlockIds 追蹤中
+  for (const oldId of initialBlocks) {
+    assert.ok(p.notionBlockIds.includes(oldId), '刪除失敗的舊區塊 ID 必須持續追蹤，不可丟失！');
+  }
+
+  // 考生或系統重試同步（網路恢復正常）
+  mock.setFailBlockDelete(false);
+  p.note = '重試同步成功';
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+
+  // 驗證原本殘留的舊區塊全部已被清理，頁面上沒有重複殘留
+  for (const oldId of initialBlocks) {
+    assert.equal(mock.blocks.has(oldId), false, '重試後舊區塊應完全清理');
+  }
+}
+
+// 案例 11：資料庫切換隔離 (AC-09)：切換 Database ID 後，不覆寫原資料庫頁面，在新資料庫建立新頁面並記錄 notionDbId
+{
+  const mock = createMockNotionServer();
+  const p = { box: 1, note: '資料庫 1 筆記' };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-original', callNotion: mock.mockCallNotion });
+  const db1PageId = p.notionPageId;
+  assert.equal(p.notionDbId, 'db-original');
+  assert.equal(mock.pages.get(db1PageId).parent.database_id, 'db-original');
+
+  // 切換至第二個資料庫
+  p.note = '資料庫 2 筆記';
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-new-target', callNotion: mock.mockCallNotion });
+
+  assert.notEqual(p.notionPageId, db1PageId, '切換資料庫必須建立新頁面，不可覆寫舊資料庫頁面');
+  assert.equal(p.notionDbId, 'db-new-target');
+  assert.equal(mock.pages.get(p.notionPageId).parent.database_id, 'db-new-target');
+  // 舊資料庫中的頁面依然完整保留
+  assert.ok(mock.pages.has(db1PageId), '原資料庫頁面應獨立保留');
 }
 
 console.log('PASS (Notion 正文原子更新、內容保護與錯誤處理測試)');
