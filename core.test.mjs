@@ -166,7 +166,7 @@ assert.ok(parsedOpts['D'].includes('PCA'));
 const diagCorrect = diagnoseStudentAnswer(sampleQ, 2, '我選特徵交叉，因為可以捕捉欄位之間的非線性交互關係，A 只是 one-hot。');
 assert.equal(diagCorrect.isCorrect, true);
 assert.equal(diagCorrect.pickedLetter, 'C');
-assert.ok(diagCorrect.statusSummary.includes('作答正確'));
+assert.ok(diagCorrect.statusSummary.includes('選擇正解'));
 assert.ok(diagCorrect.optionBreakdowns.length === 4);
 
 // 測試考生選錯 (選 A)
@@ -174,7 +174,34 @@ const diagWrong = diagnoseStudentAnswer(sampleQ, 0, '我覺得是 One-hot 編碼
 assert.equal(diagWrong.isCorrect, false);
 assert.equal(diagWrong.pickedLetter, 'A');
 assert.equal(diagWrong.correctLetter, 'C');
-assert.ok(diagWrong.statusSummary.includes('作答有誤'));
+assert.ok(diagWrong.statusSummary.includes('選擇非正解'));
 assert.ok(diagWrong.advice.includes('One-hot'));
 
-console.log('PASS (含 parseExplanationOptions & diagnoseStudentAnswer)');
+// 空解析與「略」邊界測試（防範 null 展開崩潰）
+const qEmpty = { id: 't-empty', level: '初級', question: '題幹', options: ['A','B','C','D'], answer: 0, explanation: '' };
+const dEmpty = diagnoseStudentAnswer(qEmpty, 0, '隨手作答');
+assert.equal(dEmpty.isCorrect, true);
+assert.equal(dEmpty.explanation, '');
+
+const qLue = { id: 't-lue', level: '初級', question: '題幹', options: ['A','B','C','D'], answer: 0, explanation: '略' };
+const dLue = diagnoseStudentAnswer(qLue, 0, '略過');
+assert.equal(dLue.isCorrect, true);
+
+// 否定詞與反向誤解檢測
+const sampleQNeg = {
+  id: 'test-neg',
+  level: '初級',
+  subject: '機器學習',
+  topic: '監督式學習',
+  chapter: '機器學習基礎',
+  question: '關於監督式學習的敘述何者正確？',
+  options: ['需要標記資料', '不需要標記資料', '完全不用資料', '只用隨機數'],
+  answer: 0,
+  explanation: '正解 (A)。監督式學習需要標記資料進行訓練。(B) 不需要標記資料的是非監督式學習。',
+};
+const dNeg = diagnoseStudentAnswer(sampleQNeg, 0, '監督式學習不需要標記資料');
+assert.equal(dNeg.hasNegation, true);
+assert.ok(dNeg.advice.includes('注意') || dNeg.advice.includes('否定'));
+assert.ok(!dNeg.advice.includes('思路清晰！精準掌握'));
+
+console.log('PASS (含 parseExplanationOptions & diagnoseStudentAnswer & edge cases)');

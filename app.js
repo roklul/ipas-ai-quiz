@@ -15,8 +15,13 @@ let store = load();
 let pushTimer = null;
 let dirty = false; // 有未上傳的本機變動才寫 KV(localStorage 才是本機真相,KV 只跨裝置)
 let activeMockTimer = null;
+let activeMockSessionSaver = null;
 
 function clearMockTimer() {
+  if (activeMockSessionSaver) {
+    try { activeMockSessionSaver(); } catch {}
+    activeMockSessionSaver = null;
+  }
   if (activeMockTimer) {
     clearInterval(activeMockTimer);
     activeMockTimer = null;
@@ -227,13 +232,19 @@ function mergeStores(target, incoming) {
         out.q[qid] = {
           ...tp,
           ...ip,
-          attempts: Math.max(ip.attempts || 0, (ip.correct || 0) + (ip.wrong || 0)),
+          attempts: Math.max(tp.attempts || 0, ip.attempts || 0, (ip.correct || 0) + (ip.wrong || 0), (tp.correct || 0) + (tp.wrong || 0)),
+          correct: Math.max(tp.correct || 0, ip.correct || 0),
+          wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
+          lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
         };
       } else if (tTime > iTime) {
         out.q[qid] = {
           ...ip,
           ...tp,
-          attempts: Math.max(tp.attempts || 0, (tp.correct || 0) + (tp.wrong || 0)),
+          attempts: Math.max(tp.attempts || 0, ip.attempts || 0, (tp.correct || 0) + (tp.wrong || 0), (ip.correct || 0) + (ip.wrong || 0)),
+          correct: Math.max(tp.correct || 0, ip.correct || 0),
+          wrong: Math.max(tp.wrong || 0, ip.wrong || 0),
+          lastAnsweredAt: Math.max(tp.lastAnsweredAt || 0, ip.lastAnsweredAt || 0),
         };
       } else {
         const useIncoming = (ip.attempts || 0) > (tp.attempts || 0);
@@ -521,7 +532,10 @@ async function callNotion(endpoint, { method = 'GET', body = null } = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    const err = new Error(data.message || data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.code = data.code;
+    throw err;
   }
   return data;
 }
@@ -542,14 +556,42 @@ async function syncQuestionToNotion(q, p = {}) {
   const schema = await fetchDbSchema().catch(() => null);
   const payload = buildNotionPagePayload(q, p, dbId, schema);
 
-  // 若先前已同步過，以 PATCH 更新既有頁面屬性，避免重複建立分頁
   if (p.notionPageId) {
     try {
-      const updatePayload = { properties: payload.properties };
-      const res = await callNotion(`pages/${p.notionPageId}`, { method: 'PATCH', body: updatePayload });
+      // 1. 更新頁面屬性 (properties)
+      const res = await callNotion(`pages/${p.notionPageId}`, {
+        method: 'PATCH',
+        body: { properties: payload.properties },
+      });
+
+      // 2. 同步更新內文區塊 (children blocks)，確保考生思路、解析與筆記完整替換
+      try {
+        const existingBlocks = await callNotion(`blocks/${p.notionPageId}/children?page_size=100`);
+        if (existingBlocks?.results?.length) {
+          for (const block of existingBlocks.results) {
+            await callNotion(`blocks/${block.id}`, { method: 'DELETE' }).catch(() => {});
+          }
+        }
+        if (payload.children?.length) {
+          await callNotion(`blocks/${p.notionPageId}/children`, {
+            method: 'PATCH',
+            body: { children: payload.children },
+          });
+        }
+      } catch (blockErr) {
+        console.warn('更新 Notion 內文區塊失敗（屬性已更新）：', blockErr);
+      }
+
       return res;
-    } catch {
-      delete p.notionPageId;
+    } catch (err) {
+      // 僅在確認頁面已於 Notion 刪除 (404 / object_not_found) 時才降級為重新建立分頁
+      const isNotFound = err.status === 404 || err.code === 'object_not_found' || /not_found/i.test(err.message || '');
+      if (isNotFound) {
+        delete p.notionPageId;
+      } else {
+        // 暫時性錯誤（429 頻率限制、500、網路異常等）直接拋出，不降級為 POST，防止產生重複分頁！
+        throw err;
+      }
     }
   }
 
@@ -1132,7 +1174,10 @@ function runPractice(pool, opts = {}) {
       if (!fbBox) return;
 
       const matchedHtml = diag.matchedKeywords.length
-        ? `<div style="margin:4px 0;font-size:13px"><span style="color:#16a34a;font-weight:600">✓ 掌握關鍵考點：</span>${diag.matchedKeywords.map((kw) => `<span style="background:#dcfce7;color:#166534;padding:2px 6px;border-radius:4px;font-size:12px;margin-right:4px">${esc(kw)}</span>`).join('')}</div>`
+        ? `<div style="margin:4px 0;font-size:13px"><span style="color:#0369a1;font-weight:600">📋 提及相關考點詞：</span>${diag.matchedKeywords.map((kw) => `<span style="background:#e0f2fe;color:#0369a1;padding:2px 6px;border-radius:4px;font-size:12px;margin-right:4px">${esc(kw)}</span>`).join('')}</div>`
+        : '';
+      const negationWarningHtml = diag.hasNegation
+        ? `<div style="margin:4px 0;padding:6px 10px;background:#fffbeb;border:1px solid #fef3c7;border-radius:6px;font-size:12.5px;color:#92400e;line-height:1.4">⚠️ <b>提醒：</b>自述包含否定或限制詞彙，請對照下方解析確認是否為反向猜對或誤判條件。</div>`
         : '';
       const missingHtml = diag.missingKeywords.length && (p.studentAnswer || '').trim()
         ? `<div style="margin:4px 0;font-size:13px"><span style="color:#d97706;font-weight:600">💡 建議補充思考：</span>${diag.missingKeywords.map((kw) => `<span style="background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px;font-size:12px;margin-right:4px">${esc(kw)}</span>`).join('')}</div>`
@@ -1157,9 +1202,13 @@ function runPractice(pool, opts = {}) {
             <span style="font-weight:700;font-size:14px;color:${diag.isCorrect ? '#166534' : '#991b1b'}">${diag.statusSummary}</span>
           </div>
           <p style="margin:0 0 6px;font-size:13px;line-height:1.5;color:#1e293b">${esc(diag.advice)}</p>
+          ${negationWarningHtml}
           ${matchedHtml}
           ${missingHtml}
           ${optionsTable}
+          <div class="muted" style="font-size:11.5px;margin-top:6px;line-height:1.4;color:#64748b">
+            註：AI 思路比對依據關鍵詞與語意標籤輔助自查，真實理解程度請以官方詳解之因果論證為準，切勿僅憑提及名詞斷定完全掌握。
+          </div>
         </div>
       `;
     };
@@ -1729,15 +1778,6 @@ function runMock(pool, mins, existingSession = null) {
   let remaining = existingSession?.remaining != null ? existingSession.remaining : mins * 60;
   const paperName = pool[0] ? `${pool[0].level}｜${pool[0].round}｜${pool[0].subject}` : '模擬考';
 
-  clearMockTimer();
-  const fmt = () => `${String((remaining / 60) | 0).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`;
-  activeMockTimer = setInterval(() => {
-    remaining--;
-    const t = $('#timer');
-    if (t) t.textContent = fmt();
-    if (remaining <= 0) { clearMockTimer(); submit(); }
-  }, 1000);
-
   const saveSession = () => {
     store.mockSession = {
       poolIds: pool.map((q) => q.id),
@@ -1749,6 +1789,21 @@ function runMock(pool, mins, existingSession = null) {
     };
     save();
   };
+
+  clearMockTimer();
+  activeMockSessionSaver = saveSession;
+
+  const fmt = () => `${String((remaining / 60) | 0).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`;
+  activeMockTimer = setInterval(() => {
+    remaining--;
+    const t = $('#timer');
+    if (t) t.textContent = fmt();
+    if (remaining <= 0) {
+      activeMockSessionSaver = null;
+      clearMockTimer();
+      submit();
+    }
+  }, 1000);
 
   const render = () => {
     const q = pool[i];
@@ -1803,14 +1858,18 @@ function runMock(pool, mins, existingSession = null) {
   };
 
   function submit() {
+    activeMockSessionSaver = null;
     clearMockTimer();
-    // 計入進度（只把實際作答的題目計入 attempts / correct / wrong，未作答不懲罰性破壞 Leitner 箱子）
+    const now = Date.now();
+    // 計入進度（只把實際作答的題目計入 attempts / correct / wrong，更新時間戳確保跨裝置同步不被舊資料覆蓋）
     pool.forEach((q, idx) => {
       if (answers[idx] === null) return;
       const p = qp(q.id);
       const correct = answers[idx] === q.answer;
       p.attempts++;
       if (correct) p.correct++; else p.wrong++;
+      p.lastAnsweredAt = now;
+      p.updatedAt = now;
       p.box = nextBox(p.box, correct);
       logRecent(correct);
       bumpDaily(correct);

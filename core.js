@@ -436,15 +436,17 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
     };
   });
 
-  // 2. 考生思路比對與考點關鍵詞
+  // 2. 考生思路比對與考點關鍵詞提取（防範空解析或短文字 match 為 null）
   const trimmedAnswer = (studentAnswerText || '').trim();
   const matchedKeywords = [];
   const missingKeywords = [];
 
+  const explanationText = q.explanation || '';
+  const expMatches = explanationText.match(/[一-龥A-Za-z0-9_-]{3,12}/g) || [];
   const candidateKeywords = [
     q.topic,
     q.chapter,
-    ...(q.explanation || '').match(/[\u4e00-\u9fa5A-Za-z0-9_-]{3,12}/g || []),
+    ...expMatches,
   ].filter(Boolean);
   const uniqueKeyTerms = Array.from(new Set(candidateKeywords)).filter((kw) => kw.length >= 3).slice(0, 8);
 
@@ -458,29 +460,34 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
     }
   }
 
-  // 3. 診斷摘要與建議
+  // 3. 語意反向陷阱檢測（否定詞/限制詞）
+  const hasNegation = /(?:不需|不需要|不用|不是|並非|缺乏|相反|沒有|未提供|不具備|非)/.test(trimmedAnswer);
+
+  // 4. 診斷摘要與建議（客觀陳述比對結果，不宣稱考生已完全理解）
   let statusSummary = '';
   let advice = '';
 
   if (pickedLetter === null) {
     statusSummary = '尚未作答';
-    advice = '建議先依直覺選出答案，並在下方寫下你選擇該選項的理由與其他選項錯在哪裡。';
+    advice = '建議先選出答案，並在下方簡要寫下你的推論依據與其他選項的破綻。';
   } else if (isCorrect) {
-    statusSummary = `作答正確（選 ${pickedLetter}）`;
+    statusSummary = `選擇正解（${correctLetter}）`;
     if (!trimmedAnswer) {
-      advice = '雖然選對，但強烈建議在下方寫下簡短思路（例如：各選項錯在哪），主動回想能強化長期記憶。';
+      advice = `作答正確！建議在下方寫下你選擇 (${correctLetter}) 的理由或排除了哪些干擾項，以主動回想鞏固記憶。`;
+    } else if (hasNegation) {
+      advice = `選擇正確，且自述中提及考點詞「${matchedKeywords.slice(0, 3).join('、') || '相關概念'}」。⚠️ 注意：自述包含否定或限制詞彙，請務必比對下方官方詳解，確認是否符合正解之因果定義，避免反向誤解。`;
     } else if (matchedKeywords.length > 0) {
-      advice = `思路清晰！精準掌握了核心概念「${matchedKeywords.slice(0, 3).join('、')}」。`;
+      advice = `選擇正確，自述提及相關考點詞「${matchedKeywords.slice(0, 3).join('、')}」。請對照下方【各選項解析與干擾陷阱剖析】，核對推論因果是否完全相符（提及名詞不代表因果完全正確，建議自主審視論證）。`;
     } else {
-      advice = '答案正確！建議比對下方官方考點關鍵詞，補齊完整的論證邏輯。';
+      advice = '選擇正確！但自述中未出現官方核心考點名詞。建議對照下方詳解補齊關鍵論證。';
     }
   } else {
-    statusSummary = `作答有誤（選擇 ${pickedLetter}，正確答案為 ${correctLetter}）`;
-    const pickedOptAnalysis = optMap[pickedLetter] ? `選項 (${pickedLetter}) 陷阱剖析：${optMap[pickedLetter]}` : `選項 (${pickedLetter}) 為非預期干擾項。`;
+    statusSummary = `選擇非正解（選 ${pickedLetter}，正解為 ${correctLetter}）`;
+    const pickedOptAnalysis = optMap[pickedLetter] ? `選項 (${pickedLetter}) 陷阱剖析：${optMap[pickedLetter]}` : `選項 (${pickedLetter}) 為干擾項。`;
     if (!trimmedAnswer) {
-      advice = `${pickedOptAnalysis} 請思考為何 (${correctLetter}) 才是最佳解答。`;
+      advice = `${pickedOptAnalysis} 請思考為何 (${correctLetter}) 才是正確答案。`;
     } else {
-      advice = `你選擇了 (${pickedLetter})。${pickedOptAnalysis} 建議比對 (${correctLetter}) 的核心定義以釐清混淆觀念。`;
+      advice = `你選擇了 (${pickedLetter})。${pickedOptAnalysis} 即使自述提及「${matchedKeywords.slice(0, 3).join('、') || '相關概念'}」，仍須特別留意概念條件是否與正解 (${correctLetter}) 相悖。請詳讀下方各選項剖析。`;
     }
   }
 
@@ -490,9 +497,10 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
     pickedLetter,
     statusSummary,
     advice,
+    hasNegation,
     matchedKeywords,
     missingKeywords: missingKeywords.slice(0, 3),
     optionBreakdowns,
-    explanation: q.explanation || '',
+    explanation: explanationText,
   };
 }
