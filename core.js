@@ -505,7 +505,7 @@ export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '
   };
 }
 
-// 智慧深度合併兩份進度（自洽統計快照 + 獨立屬性時間戳合併）
+// 智慧深度合併兩份進度（唯一作答事件去重 + 自洽統計快照 + 獨立屬性時間戳 + 重設版本隔離）
 export function mergeStores(target, incoming, todayStr = new Date().toISOString().slice(0, 10)) {
   if (!incoming || !incoming.q) return target;
   const out = structuredClone(target);
@@ -513,33 +513,78 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
   out.cards ||= {};
   out.history ||= {};
   out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
+
+  // 重設版本隔離 (AC-08): 取兩端較新之重設時間戳，早於重設點之作答紀錄一律不計入
+  const resetAt = Math.max(target.statsResetAt || 0, incoming.statsResetAt || 0);
+  if (resetAt > 0) out.statsResetAt = resetAt;
+
   if ((incoming.updatedAt || 0) > (out.updatedAt || 0)) {
     out.settings = { ...(out.settings || {}), ...(incoming.settings || {}) };
     if (incoming.syncCode) out.syncCode = incoming.syncCode;
   }
 
-  // 1. 合併每題進度 q（以自洽統計快照與獨立屬性時間戳合併，徹底防止跨端統計矛盾與誤覆蓋）
+  // 1. 合併每題進度 q
   for (const [qid, ip] of Object.entries(incoming.q || {})) {
     const tp = out.q[qid];
     if (!tp) {
-      out.q[qid] = { ...ip };
+      // 處理全新題目，若進來之紀錄早於重設點，統計歸零
+      const item = structuredClone(ip);
+      const itemLogs = (item.logs || []).filter((l) => l && l.id && (l.t || 0) > resetAt);
+      if (item.logs || resetAt > 0) {
+        item.logs = itemLogs;
+        item.attempts = itemLogs.length;
+        item.correct = itemLogs.filter((l) => l.c).length;
+        item.wrong = itemLogs.filter((l) => !l.c).length;
+        item.lastAnsweredAt = itemLogs.length ? itemLogs[itemLogs.length - 1].t : 0;
+      }
+      out.q[qid] = item;
       continue;
     }
 
-    // A. 統計快照 (Cohesive Statistics Snapshot): 作答次數、答對、答錯、箱子屬於同一份自洽狀態，絕不跨端獨立取 max
-    let stats;
-    const tAttempts = tp.attempts || 0;
-    const iAttempts = ip.attempts || 0;
-    if (iAttempts > tAttempts) {
-      stats = ip;
-    } else if (tAttempts > iAttempts) {
-      stats = tp;
+    // A. 作答事件唯一 ID 合併與去重 (AC-07): 兩端各答一次均保留，反覆同步數字不變
+    let finalAttempts = 0;
+    let finalCorrect = 0;
+    let finalWrong = 0;
+    let finalLastAnsweredAt = 0;
+    let mergedLogs = [];
+
+    const hasLogs = (tp.logs && tp.logs.length) || (ip.logs && ip.logs.length);
+    if (hasLogs) {
+      const logMap = new Map();
+      for (const l of (tp.logs || [])) {
+        if (l && l.id && (l.t || 0) > resetAt) logMap.set(l.id, l);
+      }
+      for (const l of (ip.logs || [])) {
+        if (l && l.id && (l.t || 0) > resetAt) logMap.set(l.id, l);
+      }
+      mergedLogs = Array.from(logMap.values()).sort((a, b) => a.t - b.t);
+      finalAttempts = mergedLogs.length;
+      finalCorrect = mergedLogs.filter((l) => l.c).length;
+      finalWrong = mergedLogs.filter((l) => !l.c).length;
+      finalLastAnsweredAt = mergedLogs.length ? mergedLogs[mergedLogs.length - 1].t : 0;
     } else {
-      // 次數相同時，以作答時間較新者（lastAnsweredAt 或 updatedAt）之自洽快照為準
-      const tAnsTime = tp.lastAnsweredAt || tp.updatedAt || 0;
-      const iAnsTime = ip.lastAnsweredAt || ip.updatedAt || 0;
-      stats = (iAnsTime >= tAnsTime) ? ip : tp;
+      // 兼容無 logs 之舊版資料：採自洽統計快照，絕不跨端各取 max
+      let stats;
+      const tAttempts = tp.attempts || 0;
+      const iAttempts = ip.attempts || 0;
+      if (iAttempts > tAttempts) stats = ip;
+      else if (tAttempts > iAttempts) stats = tp;
+      else {
+        const tAnsTime = tp.lastAnsweredAt || tp.updatedAt || 0;
+        const iAnsTime = ip.lastAnsweredAt || ip.updatedAt || 0;
+        stats = (iAnsTime >= tAnsTime) ? ip : tp;
+      }
+      const statsValid = (stats.lastAnsweredAt || stats.updatedAt || 0) > resetAt;
+      finalAttempts = statsValid ? (stats.attempts || 0) : 0;
+      finalCorrect = statsValid ? (stats.correct || 0) : 0;
+      finalWrong = statsValid ? (stats.wrong || 0) : 0;
+      finalLastAnsweredAt = statsValid ? (stats.lastAnsweredAt || 0) : 0;
     }
+
+    // 箱位決定：以較新之作答紀錄為準
+    const tAnsTime = tp.lastAnsweredAt || tp.updatedAt || 0;
+    const iAnsTime = ip.lastAnsweredAt || ip.updatedAt || 0;
+    const boxWinner = (iAnsTime >= tAnsTime) ? ip : tp;
 
     // B. 筆記與解題思路：依 noteUpdatedAt（或 updatedAt）較新者為準，允許清空刪除
     const tNoteTime = tp.noteUpdatedAt || tp.updatedAt || 0;
@@ -556,18 +601,18 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     const iRevTime = ip.reviewUpdatedAt || ip.updatedAt || 0;
     const revWinner = (iRevTime > tRevTime) ? ip : tp;
 
-    // E. Notion 頁面關聯：保留既有 ID 與較新的同步時間
+    // E. Notion 頁面關聯與管理區塊 ID
     const notionPageId = tp.notionPageId || ip.notionPageId;
+    const notionBlockIds = tp.notionBlockIds || ip.notionBlockIds || [];
     const notionSyncedAt = Math.max(tp.notionSyncedAt || 0, ip.notionSyncedAt || 0);
 
-    const mergedAttempts = Math.max(stats.attempts || 0, (stats.correct || 0) + (stats.wrong || 0));
-
     out.q[qid] = {
-      box: stats.box || 1,
-      attempts: mergedAttempts,
-      correct: stats.correct || 0,
-      wrong: stats.wrong || 0,
-      lastAnsweredAt: stats.lastAnsweredAt || 0,
+      box: boxWinner.box || 1,
+      attempts: finalAttempts,
+      correct: finalCorrect,
+      wrong: finalWrong,
+      logs: mergedLogs,
+      lastAnsweredAt: finalLastAnsweredAt,
       note: noteWinner.note || '',
       studentAnswer: noteWinner.studentAnswer || '',
       noteUpdatedAt: Math.max(tNoteTime, iNoteTime),
@@ -577,6 +622,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
       reviewDue: revWinner.reviewDue,
       reviewUpdatedAt: Math.max(tRevTime, iRevTime),
       notionPageId,
+      notionBlockIds,
       notionSyncedAt,
       updatedAt: Math.max(tp.updatedAt || 0, ip.updatedAt || 0),
     };
@@ -587,7 +633,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     out.cards[cid] = { ...(ic || {}), ...(out.cards[cid] || {}) };
   }
 
-  // 3. 合併每日歷史 history (30天趨勢與今日題數來源)
+  // 3. 合併每日歷史 history
   for (const [d, ih] of Object.entries(incoming.history || {})) {
     const th = out.history[d];
     if (!th) {
@@ -612,7 +658,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     if (out.history[t].a < maxTodayCount) out.history[t].a = maxTodayCount;
   }
 
-  // 5. 合併連續打卡天數 streak
+  // 5. 連續打卡天數 streak
   const ts = out.streak || { count: 0, lastDate: '' };
   const is = incoming.streak || { count: 0, lastDate: '' };
   if ((is.lastDate || '') > (ts.lastDate || '') || ((is.lastDate === ts.lastDate) && (is.count || 0) > (ts.count || 0))) {
@@ -626,4 +672,96 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
 
   out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
   return out;
+}
+
+// 具備錯誤隔離、內容保護、分頁處理與考生自訂內容防刪的 Notion 同步函式 (FR-07, AC-09, AC-10)
+export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchDbSchema = null }) {
+  if (!dbId) throw new Error('尚未設定 Database ID');
+  const schema = fetchDbSchema ? await fetchDbSchema().catch(() => null) : null;
+  const payload = buildNotionPagePayload(q, p, dbId, schema);
+
+  if (p.notionPageId) {
+    let pageUpdated = false;
+    // 1. 頁面層級屬性更新 (PATCH /pages/:id)
+    try {
+      await callNotion(`pages/${p.notionPageId}`, {
+        method: 'PATCH',
+        body: { properties: payload.properties },
+      });
+      pageUpdated = true;
+    } catch (pageErr) {
+      // 僅在頁面本身明確 404 (object_not_found) 時，重設 ID 降級為重新建立頁面
+      const isNotFound = pageErr.status === 404 || pageErr.code === 'object_not_found' || /not_found/i.test(pageErr.message || '');
+      if (isNotFound) {
+        delete p.notionPageId;
+        delete p.notionBlockIds;
+      } else {
+        // 429、500 等暫時性錯誤直接拋出，不清除 notionPageId，不降級為 POST
+        throw pageErr;
+      }
+    }
+
+    if (pageUpdated) {
+      // 2. 決定需要管理的系統舊區塊 ID 清單
+      // 僅管理系統產生的區塊 (p.notionBlockIds)，絕不刪除考生自行在頁面內新增的個人內容
+      let oldManagedBlockIds = [];
+      if (Array.isArray(p.notionBlockIds)) {
+        oldManagedBlockIds = [...p.notionBlockIds];
+      } else {
+        // 舊版資料未記錄 notionBlockIds 時才退回讀取全頁區塊（支援完整分頁）
+        let cursor = undefined;
+        let allPageBlocks = [];
+        do {
+          const endpoint = `blocks/${p.notionPageId}/children?page_size=100` + (cursor ? `&start_cursor=${encodeURIComponent(cursor)}` : '');
+          const pageRes = await callNotion(endpoint);
+          allPageBlocks.push(...(pageRes?.results || []));
+          cursor = pageRes?.has_more ? pageRes.next_cursor : undefined;
+        } while (cursor);
+        oldManagedBlockIds = allPageBlocks.map((b) => b.id);
+      }
+
+      // 3. 先追加最新內文區塊（確保新內容已成功寫入，絕不預先刪除造成正文清空）
+      let newBlockIds = [];
+      if (payload.children?.length) {
+        const appendRes = await callNotion(`blocks/${p.notionPageId}/children`, {
+          method: 'PATCH',
+          body: { children: payload.children },
+        });
+        newBlockIds = (appendRes?.results || []).map((b) => b.id);
+        p.notionBlockIds = newBlockIds;
+      }
+
+      // 4. 新內容確認寫入後，再刪除系統舊管理區塊
+      for (const oldId of oldManagedBlockIds) {
+        try {
+          await callNotion(`blocks/${oldId}`, { method: 'DELETE' });
+        } catch (blockErr) {
+          // 區塊 404 代表該區塊已在 Notion 刪除或不存在，視為已刪除，絕不因此重設 notionPageId！
+          if (blockErr.status === 404 || blockErr.code === 'object_not_found') {
+            continue;
+          }
+          // 其他區塊錯誤（如 500、網路中斷）向上拋出以如實告知失敗
+          throw blockErr;
+        }
+      }
+
+      return { id: p.notionPageId, properties: payload.properties };
+    }
+  }
+
+  // 首次建立頁面
+  const result = await callNotion('pages', { method: 'POST', body: payload });
+  if (result && result.id) {
+    p.notionPageId = result.id;
+    p.notionBlockIds = [];
+    if (payload.children?.length) {
+      try {
+        const blkRes = await callNotion(`blocks/${result.id}/children?page_size=100`);
+        p.notionBlockIds = (blkRes?.results || []).map((b) => b.id);
+      } catch {
+        // non-blocking
+      }
+    }
+  }
+  return result;
 }

@@ -1,4 +1,4 @@
-import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores } from './core.js';
+import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -446,53 +446,11 @@ async function fetchDbSchema() {
 
 async function syncQuestionToNotion(q, p = {}) {
   const { dbId } = getNotionConfig();
-  if (!dbId) throw new Error('尚未設定 Database ID');
-  const schema = await fetchDbSchema().catch(() => null);
-  const payload = buildNotionPagePayload(q, p, dbId, schema);
-
-  if (p.notionPageId) {
-    try {
-      // 1. 先更新頁面屬性 (properties)
-      const res = await callNotion(`pages/${p.notionPageId}`, {
-        method: 'PATCH',
-        body: { properties: payload.properties },
-      });
-
-      // 2. 獲取既有舊區塊列表
-      const existingBlocks = await callNotion(`blocks/${p.notionPageId}/children?page_size=100`);
-      const oldBlockIds = (existingBlocks?.results || []).map((b) => b.id);
-
-      // 3. 先追加最新內文區塊（確保新內容已成功寫入，絕不預先刪除造成正文清空）
-      if (payload.children?.length) {
-        await callNotion(`blocks/${p.notionPageId}/children`, {
-          method: 'PATCH',
-          body: { children: payload.children },
-        });
-      }
-
-      // 4. 新內容確認寫入後，再刪除舊區塊（若失敗則拋出錯誤讓介面重試，但新內容已保全）
-      for (const oldId of oldBlockIds) {
-        await callNotion(`blocks/${oldId}`, { method: 'DELETE' });
-      }
-
-      return res;
-    } catch (err) {
-      // 僅在確認頁面已於 Notion 刪除 (404 / object_not_found) 時才降級為重新建立分頁
-      const isNotFound = err.status === 404 || err.code === 'object_not_found' || /not_found/i.test(err.message || '');
-      if (isNotFound) {
-        delete p.notionPageId;
-      } else {
-        // 暫時性錯誤或正文寫入失敗直接拋出，不降級為 POST，防止產生重複分頁並讓介面如實回報失敗！
-        throw err;
-      }
-    }
-  }
-
-  const result = await callNotion('pages', { method: 'POST', body: payload });
-  if (result && result.id) {
-    p.notionPageId = result.id;
-  }
-  return result;
+  return coreSyncQuestionToNotion(q, p, {
+    dbId,
+    callNotion,
+    fetchDbSchema,
+  });
 }
 
 // ---- views ----
@@ -1006,15 +964,24 @@ function runPractice(pool, opts = {}) {
   const answer = (q, k) => {
     const p = qp(q.id);
     const correct = k === q.answer;
-    p.attempts++;
-    p.lastAnsweredAt = Date.now();
-    p.updatedAt = Date.now();
+    const now = Date.now();
+    const logEntry = {
+      id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      t: now,
+      c: correct,
+    };
+    p.logs ||= [];
+    p.logs.push(logEntry);
+    p.attempts = p.logs.length;
+    p.lastAnsweredAt = now;
+    p.updatedAt = now;
     if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
     p.box = nextBox(p.box, correct);
 
     const next = calcNextReview(p.reviewStage || (correct ? 1 : 0), correct);
     p.reviewStage = next.stage;
     p.reviewDue = next.due;
+    p.reviewUpdatedAt = now;
     const reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
       🧠 遺忘曲線排程：第 ${next.stage} 階段（${next.days} 天後再次複習）
     </span>`;
@@ -1772,7 +1739,14 @@ function runMock(pool, mins, existingSession = null) {
       if (answers[idx] === null) return;
       const p = qp(q.id);
       const correct = answers[idx] === q.answer;
-      p.attempts++;
+      const logEntry = {
+        id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
+        t: now,
+        c: correct,
+      };
+      p.logs ||= [];
+      p.logs.push(logEntry);
+      p.attempts = p.logs.length;
       if (correct) p.correct++; else p.wrong++;
       p.lastAnsweredAt = now;
       p.updatedAt = now;
@@ -2469,14 +2443,41 @@ function settings() {
     save(); settings();
   };
   $('#reset-stats').onclick = () => {
-    if (!confirm('重設統計?掌握度、正確率、錯題本、打卡、趨勢都歸零;保留筆記、星標與設定。')) return;
+    if (!confirm('重設統計？掌握度、正確率、錯題本、打卡、趨勢都歸零；保留筆記、解題思路、星標與設定。')) return;
+    const now = Date.now();
+    store.statsResetAt = now;
+    store.updatedAt = now;
     for (const id in store.q) {
       const p = store.q[id];
-      if (p.note || p.starred) store.q[id] = { box: 1, attempts: 0, correct: 0, wrong: 0, note: p.note || '', starred: !!p.starred };
-      else delete store.q[id];
+      if (p.note || p.starred || p.studentAnswer) {
+        store.q[id] = {
+          box: 1,
+          attempts: 0,
+          correct: 0,
+          wrong: 0,
+          logs: [],
+          note: p.note || '',
+          studentAnswer: p.studentAnswer || '',
+          noteUpdatedAt: p.noteUpdatedAt || 0,
+          starred: !!p.starred,
+          starredUpdatedAt: p.starredUpdatedAt || 0,
+          notionPageId: p.notionPageId,
+          notionSyncedAt: p.notionSyncedAt,
+          notionBlockIds: p.notionBlockIds,
+          lastAnsweredAt: 0,
+          updatedAt: now,
+        };
+      } else {
+        delete store.q[id];
+      }
     }
-    store.recent = []; store.history = {}; store.streak = { count: 0, lastDate: '' }; store.daily = null;
-    save(); settings();
+    store.recent = [];
+    store.history = {};
+    store.streak = { count: 0, lastDate: '' };
+    store.daily = null;
+    save();
+    settings();
+    alert('已成功重設學習統計，筆記、解題思路與星標已完整保留！');
   };
 }
 

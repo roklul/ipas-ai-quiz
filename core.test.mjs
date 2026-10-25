@@ -209,23 +209,67 @@ console.log('PASS (含 parseExplanationOptions & diagnoseStudentAnswer & edge ca
 // ---- 同步分歧與統計快照一致性測試 (mergeStores) ----
 import { mergeStores } from './core.js';
 
-// 測試 1：兩端各作答一次（一端答對、一端答錯），合併後絕不能出現 attempts:1, correct:1, wrong:1
-const devA_single = {
+// 測試 1 (AC-07)：A、B 裝置各作答一次（一端對、一端錯），兩筆唯一作答皆保留且冪等
+const devA_event = {
   q: {
-    'q-div-1': { box: 2, attempts: 1, correct: 1, wrong: 0, lastAnsweredAt: 1000, updatedAt: 1000 }
+    'q-ac07': {
+      box: 2,
+      attempts: 1,
+      correct: 1,
+      wrong: 0,
+      logs: [{ id: 'evt-A-1', t: 1000, c: true }],
+      lastAnsweredAt: 1000,
+      updatedAt: 1000,
+    }
   }
 };
-const devB_single = {
+const devB_event = {
   q: {
-    'q-div-1': { box: 1, attempts: 1, correct: 0, wrong: 1, lastAnsweredAt: 2000, updatedAt: 2000 }
+    'q-ac07': {
+      box: 1,
+      attempts: 1,
+      correct: 0,
+      wrong: 1,
+      logs: [{ id: 'evt-B-1', t: 2000, c: false }],
+      lastAnsweredAt: 2000,
+      updatedAt: 2000,
+    }
   }
 };
-const mergedDivergence = mergeStores(devA_single, devB_single);
-const resQ = mergedDivergence.q['q-div-1'];
-assert.equal(resQ.attempts, 1, '作答次數應自洽為 1');
-assert.equal(resQ.correct + resQ.wrong, 1, '答對與答錯總和必須等於作答次數');
-assert.ok(!(resQ.correct === 1 && resQ.wrong === 1), '嚴禁出現 correct:1 與 wrong:1 同時存在的統計矛盾！');
-assert.equal(resQ.lastAnsweredAt, 2000, '次數相同時應採最新快照');
+const mergedAC07 = mergeStores(devA_event, devB_event);
+const resAC07 = mergedAC07.q['q-ac07'];
+assert.equal(resAC07.attempts, 2, 'AC-07: 兩端各作答一次，合併後作答次數必須保留為 2');
+assert.equal(resAC07.correct, 1, 'AC-07: 答對次數為 1');
+assert.equal(resAC07.wrong, 1, 'AC-07: 答錯次數為 1');
+assert.equal(resAC07.logs.length, 2, 'AC-07: 兩筆唯一作答 event log 皆保留');
+
+// AC-07 反覆同步冪等性 (Idempotent)
+const mergedRepeatedA = mergeStores(mergedAC07, devA_event);
+assert.equal(mergedRepeatedA.q['q-ac07'].attempts, 2, 'AC-07: 再次與 A 同步作答次數仍為 2');
+assert.equal(mergedRepeatedA.q['q-ac07'].correct, 1);
+assert.equal(mergedRepeatedA.q['q-ac07'].wrong, 1);
+
+const mergedRepeatedB = mergeStores(mergedRepeatedA, devB_event);
+assert.equal(mergedRepeatedB.q['q-ac07'].attempts, 2, 'AC-07: 再次與 B 同步作答次數仍為 2');
+assert.equal(mergedRepeatedB.q['q-ac07'].correct, 1);
+assert.equal(mergedRepeatedB.q['q-ac07'].wrong, 1);
+
+// 測試 1-B (舊版無 logs 相容)：兩端各作答一次，舊快照自洽取最新，絕不各取 max 產生 1, 1, 1 矛盾
+const devA_legacy = {
+  q: {
+    'q-div-legacy': { box: 2, attempts: 1, correct: 1, wrong: 0, lastAnsweredAt: 1000, updatedAt: 1000 }
+  }
+};
+const devB_legacy = {
+  q: {
+    'q-div-legacy': { box: 1, attempts: 1, correct: 0, wrong: 1, lastAnsweredAt: 2000, updatedAt: 2000 }
+  }
+};
+const mergedLegacy = mergeStores(devA_legacy, devB_legacy);
+const resLeg = mergedLegacy.q['q-div-legacy'];
+assert.equal(resLeg.attempts, 1, '舊格式作答次數應自洽為 1');
+assert.equal(resLeg.correct + resLeg.wrong, 1, '答對與答錯總和必須等於作答次數');
+assert.ok(!(resLeg.correct === 1 && resLeg.wrong === 1), '嚴禁出現 correct:1 與 wrong:1 同時存在的統計矛盾！');
 
 // 測試 2：Device A 模考作答 2 次，Device B 僅 1 次但有較新筆記 -> 作答次數保持 2 次且筆記更新
 const devA_mock = {
@@ -272,6 +316,65 @@ const devB_star = {
 };
 const mergedUnstar = mergeStores(devB_star, devA_unstar);
 assert.equal(mergedUnstar.q['q-div-4'].starred, false, '取消星標絕不可被舊資料復活');
+
+// 測試 5 (AC-08)：重設統計版本隔離，拉取舊備份時不復活舊作答，且保留筆記、解題思路與星標
+const devA_reset = {
+  statsResetAt: 5000,
+  updatedAt: 5000,
+  q: {
+    'q-ac08': {
+      box: 1,
+      attempts: 0,
+      correct: 0,
+      wrong: 0,
+      logs: [],
+      note: '重設後保留的筆記',
+      noteUpdatedAt: 5000,
+      studentAnswer: '重設後保留的思路',
+      starred: true,
+      starredUpdatedAt: 5000,
+      lastAnsweredAt: 0,
+      updatedAt: 5000,
+    }
+  }
+};
+const devB_oldBackup = {
+  statsResetAt: 0,
+  updatedAt: 4000,
+  q: {
+    'q-ac08': {
+      box: 2,
+      attempts: 5,
+      correct: 4,
+      wrong: 1,
+      logs: [
+        { id: 'old-1', t: 1000, c: true },
+        { id: 'old-2', t: 2000, c: true },
+        { id: 'old-3', t: 3000, c: false },
+        { id: 'old-4', t: 3500, c: true },
+        { id: 'old-5', t: 4000, c: true },
+      ],
+      note: '舊備份筆記',
+      noteUpdatedAt: 3000,
+      studentAnswer: '舊思路',
+      starred: false,
+      starredUpdatedAt: 3000,
+      lastAnsweredAt: 4000,
+      updatedAt: 4000,
+    }
+  }
+};
+
+const mergedReset = mergeStores(devA_reset, devB_oldBackup);
+const resReset = mergedReset.q['q-ac08'];
+assert.equal(resReset.attempts, 0, 'AC-08: 早期作答紀錄絕不可被舊備份復活，attempts 應為 0');
+assert.equal(resReset.correct, 0, 'AC-08: correct 應為 0');
+assert.equal(resReset.wrong, 0, 'AC-08: wrong 應為 0');
+assert.deepEqual(resReset.logs, [], 'AC-08: logs 應清空');
+assert.equal(resReset.note, '重設後保留的筆記', 'AC-08: 筆記完整保留');
+assert.equal(resReset.studentAnswer, '重設後保留的思路', 'AC-08: 考生思路完整保留');
+assert.equal(resReset.starred, true, 'AC-08: 星標完整保留');
+assert.equal(mergedReset.statsResetAt, 5000, 'AC-08: statsResetAt 戳記保留');
 
 console.log('PASS (含 mergeStores 統計自洽快照與同步分歧測試)');
 
