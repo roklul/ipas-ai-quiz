@@ -22,12 +22,22 @@ const MIME = {
 };
 
 const server = http.createServer(async (req, res) => {
-  // CORS 處理
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS 處理：嚴格限制僅允許本機 localhost / 127.0.0.1 來源
+  const origin = req.headers.origin;
+  const isAllowedOrigin = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
+  if (origin && isAllowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Notion-Version');
 
   if (req.method === 'OPTIONS') {
+    if (!isAllowedOrigin) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     res.writeHead(204);
     res.end();
     return;
@@ -36,6 +46,11 @@ const server = http.createServer(async (req, res) => {
   // 0. 本機進度檔案持久化 (/local-progress) — 防止瀏覽器清除快取、無痕視窗或不同瀏覽器導致進度消失
   const progressFilePath = path.join(__dirname, 'local-progress.json');
   if (req.url === '/local-progress' || req.url.startsWith('/local-progress?')) {
+    if (!isAllowedOrigin) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'forbidden_origin' }));
+      return;
+    }
     if (req.method === 'GET') {
       try {
         if (fs.existsSync(progressFilePath)) {
@@ -101,10 +116,13 @@ const server = http.createServer(async (req, res) => {
           body: req.method !== 'GET' && req.method !== 'HEAD' ? body : undefined,
         });
 
-        res.writeHead(notionRes.status, {
+        const notionHeaders = {
           'Content-Type': notionRes.headers.get('content-type') || 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        });
+        };
+        if (origin && isAllowedOrigin) {
+          notionHeaders['Access-Control-Allow-Origin'] = origin;
+        }
+        res.writeHead(notionRes.status, notionHeaders);
         const resBuf = Buffer.from(await notionRes.arrayBuffer());
         res.end(resBuf);
       } catch (err) {
@@ -142,7 +160,7 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`iPAS AI 題庫伺服器啟動於: http://localhost:${PORT}`);
-  console.log(`內建 Notion 轉發代理: http://localhost:${PORT}/notion`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`iPAS AI 題庫伺服器啟動於: http://127.0.0.1:${PORT}`);
+  console.log(`內建 Notion 轉發代理: http://127.0.0.1:${PORT}/notion`);
 });

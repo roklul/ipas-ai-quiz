@@ -101,10 +101,10 @@ export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與
     const kw = q.topic || q.chapter || q.subject;
     lines.push(`### ${n}. 【${q.level}・${kw}】${q.question}`);
     lines.push('');
-    q.options.forEach((o, i) => lines.push(`- **${'ABCD'[i]}.** ${o}${i === q.answer ? '  **(正解 ✓)**' : ''}`));
+    q.options.forEach((o, i) => lines.push(`- **${'ABCD'[i]}.** ${o}`));
     lines.push('');
     lines.push('<details>');
-    lines.push(`<summary><b>▶ 點擊查看答案、考生回答與 AI 逐項解析（正解：${'ABCD'[q.answer]}）</b></summary>`);
+    lines.push('<summary><b>▶ 點擊查看答案、考生回答與 AI 逐項解析</b></summary>');
     lines.push('');
     lines.push(`> **【正確答案】**：${'ABCD'[q.answer]}. ${q.options[q.answer]}`);
     if (p.studentAnswer) {
@@ -291,7 +291,7 @@ export function buildNotionPagePayload(q, p = {}, dbId, dbSchema = null) {
         rich_text: [
           {
             type: 'text',
-            text: { content: `▶️ 點擊查看答案、考生回答與 AI 檢查解析（正解：${'ABCD'[q.answer]}）` },
+            text: { content: '▶️ 點擊查看答案、考生回答與 AI 檢查解析' },
             annotations: { bold: true, color: 'blue' },
           },
         ],
@@ -395,3 +395,104 @@ export function formatReviewDue(dueTimestamp, now = Date.now()) {
   return { isDue: false, label: `${days} 天後複習`, daysRemaining: days };
 }
 
+// 解析詳解中的各選項解析字串
+export function parseExplanationOptions(explanation = '') {
+  const map = {};
+  if (!explanation) return map;
+  const regex = /(?:^|\s|[。；;])(?:\(([A-D])\)|（([A-D])）|【([A-D])】|([A-D])[\.、:：])/g;
+  let m;
+  const indices = [];
+  while ((m = regex.exec(explanation)) !== null) {
+    const letter = m[1] || m[2] || m[3] || m[4];
+    indices.push({ letter, start: m.index + m[0].length, index: m.index });
+  }
+  for (let i = 0; i < indices.length; i++) {
+    const nextStart = indices[i + 1] ? indices[i + 1].index : explanation.length;
+    const raw = explanation.slice(indices[i].start, nextStart).trim();
+    map[indices[i].letter] = raw.replace(/^[。；;、:\s]+|[。；;、\s]+$/g, '');
+  }
+  return map;
+}
+
+// AI 檢查考生回答：比對選項、解析思維盲點與各選項干擾因
+export function diagnoseStudentAnswer(q, pickedIdx = null, studentAnswerText = '') {
+  const correctLetter = 'ABCD'[q.answer];
+  const pickedLetter = pickedIdx !== null && pickedIdx !== undefined && pickedIdx >= 0 ? 'ABCD'[pickedIdx] : null;
+  const isCorrect = pickedIdx === q.answer;
+  const optMap = parseExplanationOptions(q.explanation || '');
+
+  // 1. 各選項逐項解說
+  const optionBreakdowns = q.options.map((opt, idx) => {
+    const letter = 'ABCD'[idx];
+    const isAns = idx === q.answer;
+    const isPicked = idx === pickedIdx;
+    const expText = optMap[letter] || (isAns ? '官方正解核心概念。' : '干擾選項。');
+    return {
+      letter,
+      text: opt,
+      isCorrect: isAns,
+      isPicked,
+      analysis: expText,
+    };
+  });
+
+  // 2. 考生思路比對與考點關鍵詞
+  const trimmedAnswer = (studentAnswerText || '').trim();
+  const matchedKeywords = [];
+  const missingKeywords = [];
+
+  const candidateKeywords = [
+    q.topic,
+    q.chapter,
+    ...(q.explanation || '').match(/[\u4e00-\u9fa5A-Za-z0-9_-]{3,12}/g || []),
+  ].filter(Boolean);
+  const uniqueKeyTerms = Array.from(new Set(candidateKeywords)).filter((kw) => kw.length >= 3).slice(0, 8);
+
+  if (trimmedAnswer) {
+    for (const kw of uniqueKeyTerms) {
+      if (trimmedAnswer.toLowerCase().includes(kw.toLowerCase())) {
+        matchedKeywords.push(kw);
+      } else if (matchedKeywords.length < 3) {
+        missingKeywords.push(kw);
+      }
+    }
+  }
+
+  // 3. 診斷摘要與建議
+  let statusSummary = '';
+  let advice = '';
+
+  if (pickedLetter === null) {
+    statusSummary = '尚未作答';
+    advice = '建議先依直覺選出答案，並在下方寫下你選擇該選項的理由與其他選項錯在哪裡。';
+  } else if (isCorrect) {
+    statusSummary = `作答正確（選 ${pickedLetter}）`;
+    if (!trimmedAnswer) {
+      advice = '雖然選對，但強烈建議在下方寫下簡短思路（例如：各選項錯在哪），主動回想能強化長期記憶。';
+    } else if (matchedKeywords.length > 0) {
+      advice = `思路清晰！精準掌握了核心概念「${matchedKeywords.slice(0, 3).join('、')}」。`;
+    } else {
+      advice = '答案正確！建議比對下方官方考點關鍵詞，補齊完整的論證邏輯。';
+    }
+  } else {
+    statusSummary = `作答有誤（選擇 ${pickedLetter}，正確答案為 ${correctLetter}）`;
+    const pickedOptAnalysis = optMap[pickedLetter] ? `選項 (${pickedLetter}) 陷阱剖析：${optMap[pickedLetter]}` : `選項 (${pickedLetter}) 為非預期干擾項。`;
+    if (!trimmedAnswer) {
+      advice = `${pickedOptAnalysis} 請思考為何 (${correctLetter}) 才是最佳解答。`;
+    } else {
+      advice = `你選擇了 (${pickedLetter})。${pickedOptAnalysis} 建議比對 (${correctLetter}) 的核心定義以釐清混淆觀念。`;
+    }
+  }
+
+  return {
+    isCorrect,
+    correctLetter,
+    pickedLetter,
+    statusSummary,
+    advice,
+    matchedKeywords,
+    missingKeywords: missingKeywords.slice(0, 3),
+    optionBreakdowns,
+    explanation: q.explanation || '',
+  };
+}

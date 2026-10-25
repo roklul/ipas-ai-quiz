@@ -140,3 +140,41 @@ assert.equal(futureFmt.isDue, false);
 assert.equal(futureFmt.label, '3 天後複習');
 
 console.log('PASS (含 guessLevel / nextExam / cardToNotionMarkdown / Ebbinghaus)');
+
+// ---- diagnoseStudentAnswer & parseExplanationOptions 測試 ----
+import { parseExplanationOptions, diagnoseStudentAnswer } from './core.js';
+
+const sampleQ = {
+  id: 'test-q1',
+  level: '初級',
+  subject: '科目1：人工智慧基礎概論',
+  chapter: '機器學習',
+  topic: '特徵工程',
+  question: '何種技術最適合用來結合兩個具交互作用的欄位？',
+  options: ['One-hot 編碼', '正規化', '特徵交叉', '主成分分析'],
+  answer: 2,
+  explanation: '正解 (C)。「特徵交叉(Feature Cross)」是把兩個特徵組合成新特徵。(A) One-hot 只是把單一類別轉成向量；(B) 正規化只是數值縮放；(D) PCA 是降維。',
+};
+
+const parsedOpts = parseExplanationOptions(sampleQ.explanation);
+assert.equal(parsedOpts['C'], '「特徵交叉(Feature Cross)」是把兩個特徵組合成新特徵');
+assert.ok(parsedOpts['A'].includes('One-hot'));
+assert.ok(parsedOpts['B'].includes('正規化'));
+assert.ok(parsedOpts['D'].includes('PCA'));
+
+// 測試考生選對且有思路
+const diagCorrect = diagnoseStudentAnswer(sampleQ, 2, '我選特徵交叉，因為可以捕捉欄位之間的非線性交互關係，A 只是 one-hot。');
+assert.equal(diagCorrect.isCorrect, true);
+assert.equal(diagCorrect.pickedLetter, 'C');
+assert.ok(diagCorrect.statusSummary.includes('作答正確'));
+assert.ok(diagCorrect.optionBreakdowns.length === 4);
+
+// 測試考生選錯 (選 A)
+const diagWrong = diagnoseStudentAnswer(sampleQ, 0, '我覺得是 One-hot 編碼');
+assert.equal(diagWrong.isCorrect, false);
+assert.equal(diagWrong.pickedLetter, 'A');
+assert.equal(diagWrong.correctLetter, 'C');
+assert.ok(diagWrong.statusSummary.includes('作答有誤'));
+assert.ok(diagWrong.advice.includes('One-hot'));
+
+console.log('PASS (含 parseExplanationOptions & diagnoseStudentAnswer)');
