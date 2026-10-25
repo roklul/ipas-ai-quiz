@@ -764,15 +764,19 @@ function runPractice(pool, opts = {}) {
       <section class="card">
         <div class="row">
           <span class="muted">${i + 1} / ${pool.length}</span>
-          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-            <button class="meta-toggle-btn ${hideMeta ? 'on' : ''}" id="toggle-meta-btn" title="切換顯示/隱藏考點提示（防劇透）">${hideMeta ? '👁️ 顯示考點' : '🙈 隱藏考點'}</button>
+          <div style="display:flex;gap:6px;align-items:center">
             <button class="${reviewBtnClass}" id="review-btn" title="基於艾賓浩斯遺忘曲線排程複習">${reviewBtnText}</button>
             <button class="star ${p.starred ? 'on' : ''}" id="star">${p.starred ? '★ 已標' : '☆ 標記'}</button>
           </div>
         </div>
-        ${hideMeta
-          ? `<p class="qmeta-hint" id="qmeta-hint" title="點擊顯示考點提示">🙈 考點提示已隱藏（防劇透，點此展開）</p>`
-          : `<p class="qmeta muted">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>`}
+        <div class="meta-box" style="margin:8px 0 12px">
+          <button class="meta-toggle-btn" id="toggle-meta-btn" style="cursor:pointer;font-size:13px;padding:5px 12px;border-radius:8px;background:${showCurrentMeta ? '#eff6ff' : '#f8fafc'};border:1px solid ${showCurrentMeta ? '#93c5fd' : '#cbd5e1'};color:${showCurrentMeta ? '#1d4ed8' : '#475569'};display:inline-flex;align-items:center;gap:6px;font-weight:${showCurrentMeta ? '600' : 'normal'}">
+            ${showCurrentMeta ? '🙈 隱藏考點提示' : '👁️ 點擊顯示考點提示'}
+          </button>
+          ${showCurrentMeta
+            ? `<p class="qmeta muted" style="margin:8px 0 0;padding:8px 12px;background:#f8fafc;border-radius:8px;border-left:3px solid var(--c-accent);font-size:13px;line-height:1.5">${esc(q.subject)}${q.chapter ? '・' + esc(q.chapter) : ''}${q.syllabusItem ? ' ▸ ' + esc(q.syllabusItem) : ''}${q.topic ? '（' + esc(q.topic) + '）' : ''}${q.source === '學習指引' ? ' <span class="src-tag">學習指引範例</span>' : ''}</p>`
+            : ''}
+        </div>
         <h3>${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
         <div id="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
@@ -780,19 +784,9 @@ function runPractice(pool, opts = {}) {
       </section>`;
     $('#star').onclick = () => { p.starred = !p.starred; save(); render(); };
     $('#toggle-meta-btn').onclick = () => {
-      store.settings ||= {};
-      store.settings.hideMeta = !store.settings.hideMeta;
-      save();
+      showCurrentMeta = !showCurrentMeta;
       render();
     };
-    if ($('#qmeta-hint')) {
-      $('#qmeta-hint').onclick = () => {
-        store.settings ||= {};
-        store.settings.hideMeta = false;
-        save();
-        render();
-      };
-    }
     $('#review-btn').onclick = () => {
       if (p.reviewDue) {
         delete p.reviewDue;
@@ -902,7 +896,7 @@ function runPractice(pool, opts = {}) {
     if ($('#student-answer')) $('#student-answer').oninput = (e) => { p.studentAnswer = e.target.value; save(); };
     $('#note').oninput = (e) => { p.note = e.target.value; save(); };
     if ($('#early-finish')) $('#early-finish').onclick = () => finish();
-    $('#next').onclick = () => { i++; i < pool.length ? render() : finish(); };
+    $('#next').onclick = () => { i++; showCurrentMeta = false; i < pool.length ? render() : finish(); };
   };
   const finish = () => {
     pushSync(); // checkpoint:練習完成立即上傳
