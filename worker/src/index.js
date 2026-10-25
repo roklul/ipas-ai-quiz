@@ -31,7 +31,7 @@ async function sendPush(env, sub, payloadObj) {
     applicationServerKeys: keys,
     payload: JSON.stringify(payloadObj),
     target: sub,
-    adminContact: env.ADMIN_CONTACT || 'mailto:yazelin@ching-tech.com',
+    adminContact: env.ADMIN_CONTACT || 'mailto:admin@example.com',
     ttl: 3600,
     urgency: 'normal',
   });

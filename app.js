@@ -2,8 +2,8 @@ import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMark
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
-const SYNC_URL = 'https://ipas-quiz-sync.yazelinj303.workers.dev';
-const VAPID_PUBLIC = 'BNn4Lwq818aHx8cb0LrcQ6IpRgHb9B3P_BOqusct-uFyJPQ4hlDrIOirliHoNdbbg5tg8zWfzBg5SZ0yBhRq7zA';
+const SYNC_URL = ''; // 已與原作者的雲端拆開;自架 Worker 後填入自己的網址(見 AGENTS.md),留空=純本機
+const VAPID_PUBLIC = ''; // 自架推播時填入自己的 VAPID 公鑰
 const $ = (sel) => document.querySelector(sel);
 const view = $('#view');
 
@@ -348,7 +348,7 @@ function guideLine(q) {
 }
 // 回報這題：開 GitHub issue form,自動帶入題號與科目
 function reportLink(q) {
-  const url = `https://github.com/yazelin/ipas-ai-quiz/issues/new?template=question-report.yml`
+  const url = `https://github.com/roklul/ipas-ai-quiz/issues/new?template=question-report.yml`
     + `&qid=${encodeURIComponent(q.id)}&subject=${encodeURIComponent(q.subject)}`;
   return `<p class="report-line"><a href="${url}" target="_blank" rel="noopener">這題有誤？回報給作者</a></p>`;
 }

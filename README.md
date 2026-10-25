@@ -1,6 +1,6 @@
 # iPAS AI 應用規劃師 模擬考練習
 
-**線上版：https://yazelin.github.io/ipas-ai-quiz/**
+**線上版：https://roklul.github.io/ipas-ai-quiz/**
 
 iPAS「AI 應用規劃師（初級・中級）」的線上模擬考刷題網頁。**890 題官方試題**（歷屆公告 711 + 學習指引範例 179），皆官方答案，可依來源分開練。
 
@@ -44,13 +44,13 @@ iPAS「AI 應用規劃師（初級・中級）」的線上模擬考刷題網頁�
 
 | 資源 | 網址 |
 |---|---|
-| 題庫 | `https://yazelin.github.io/ipas-ai-quiz/questions.json` |
-| 每日觀念卡 | `https://yazelin.github.io/ipas-ai-quiz/concepts.json` |
-| 考試日期 | `https://yazelin.github.io/ipas-ai-quiz/exam-dates.json` |
-| 帶圖題的圖 | `https://yazelin.github.io/ipas-ai-quiz/assets/<題目 id>.webp` |
+| 題庫 | `https://roklul.github.io/ipas-ai-quiz/questions.json` |
+| 每日觀念卡 | `https://roklul.github.io/ipas-ai-quiz/concepts.json` |
+| 考試日期 | `https://roklul.github.io/ipas-ai-quiz/exam-dates.json` |
+| 帶圖題的圖 | `https://roklul.github.io/ipas-ai-quiz/assets/<題目 id>.webp` |
 
 ```js
-const data = await (await fetch('https://yazelin.github.io/ipas-ai-quiz/questions.json')).json();
+const data = await (await fetch('https://roklul.github.io/ipas-ai-quiz/questions.json')).json();
 for (const q of data.questions) {
   q.question;            // 題幹
   q.options;             // ["A","B","C","D"](剛好 4 個)
