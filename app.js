@@ -14,6 +14,7 @@ let EXAMINFO = null;
 let store = load();
 let pushTimer = null;
 let dirty = false; // 有未上傳的本機變動才寫 KV(localStorage 才是本機真相,KV 只跨裝置)
+let dirtySeq = 0; // 每次變動 +1；上傳完成時序號沒變才可清 dirty，避免飛行中的新變動被誤標為已上傳
 let activeMockTimer = null;
 let activeMockSessionSaver = null;
 
@@ -180,6 +181,7 @@ function save() {
   store.updatedAt = Date.now();
   localStorage.setItem(STORE_KEY, JSON.stringify(store));
   dirty = true;
+  dirtySeq++;
   saveLocalDisk();
   schedulePush();
 }
@@ -243,9 +245,18 @@ async function pushSync(opts = {}) {
   clearTimeout(pushTimer); pushTimer = null;
   if (!SYNC_URL || !store.syncCode) return false;
   if (!dirty) return true; // 沒有未上傳的變動就不寫 KV
+  const seq = dirtySeq;
   try {
+    // 先與遠端合併成「上傳用副本」（不替換 store，避免畫面上持有的題目進度物件失效）；
+    // 關頁 keepalive 時來不及先讀，直接送出本機版本，降低整份覆寫蓋掉其他裝置的機會
+    let payload = structuredClone(store);
+    if (!opts.keepalive) {
+      try {
+        const g = await fetch(`${SYNC_URL}/sync/${encodeURIComponent(store.syncCode)}`);
+        if (g.ok) { const remote = await g.json(); if (remote && remote.q) payload = mergeStores(store, remote); }
+      } catch {}
+    }
     // 嚴防機敏外洩：過濾 Notion Integration Token 等本機專屬金鑰
-    const payload = structuredClone(store);
     if (payload.settings) {
       delete payload.settings.notionToken;
       delete payload.settings.notionDbId;
@@ -255,9 +266,16 @@ async function pushSync(opts = {}) {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       keepalive: opts.keepalive || false, // 關頁/切走時讓請求活過頁面卸載
     });
-    if (r.ok) dirty = false;
+    if (r.ok) { if (seq === dirtySeq) dirty = false; showSyncError(null); }
+    else showSyncError(r.status === 413 ? '雲端同步失敗：進度資料過大（413），目前僅保存在本機。請先匯出備份。' : `雲端同步失敗（${r.status}），稍後會自動重試；進度仍保存在本機。`);
     return r.ok;
-  } catch { return false; }
+  } catch { showSyncError('雲端同步失敗：網路中斷，進度仍保存在本機，恢復連線後會自動重試。'); return false; }
+}
+function showSyncError(msg) {
+  const n = document.getElementById('banner');
+  if (!n) return;
+  if (msg) { n.textContent = msg; n.hidden = false; n.dataset.syncErr = '1'; }
+  else if (n.dataset.syncErr) { delete n.dataset.syncErr; if (DATA.meta?.note) n.textContent = DATA.meta.note; else n.hidden = true; }
 }
 async function pullSync() {
   if (!SYNC_URL || !store.syncCode) return false;
@@ -268,6 +286,7 @@ async function pullSync() {
     if (remote && remote.q) {
       store = mergeStores(store, remote);
       localStorage.setItem(STORE_KEY, JSON.stringify(store));
+      dirty = true; dirtySeq++; // 合併結果可能含遠端沒有的內容，需回傳
       saveLocalDisk();
       return true;
     }
@@ -415,23 +434,43 @@ async function callNotion(endpoint, { method = 'GET', body = null } = {}) {
   const { token, proxy } = getNotionConfig();
   if (!token) throw new Error('尚未設定 Notion Token');
   const url = `${proxy.replace(/\/+$/, '')}/${endpoint.replace(/^\/+/, '')}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Notion-Version': '2022-06-28',
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.message || data.error || `HTTP ${res.status}`);
-    err.status = res.status;
-    err.code = data.code;
-    throw err;
+  // 逾時 + 有限重試：429 一律可重試（請求未被處理）；5xx／網路錯誤只重試不會造成重複的讀取與刪除
+  const idempotent = method === 'GET' || method === 'DELETE';
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: ctl.signal,
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return data;
+      const err = new Error(data.message || data.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.code = data.code;
+      lastErr = err;
+      const retriable = res.status === 429 || (idempotent && res.status >= 500);
+      if (!retriable || attempt === 2) throw err;
+      const wait = (+res.headers.get('Retry-After') || 0) * 1000 || 800 * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, Math.min(wait, 5000)));
+    } catch (e) {
+      if (e.status) throw e;
+      lastErr = new Error(e.name === 'AbortError' ? 'Notion 請求逾時' : `網路錯誤：${e.message}`);
+      if (!idempotent || attempt === 2) throw lastErr;
+      await new Promise((r) => setTimeout(r, 800 * 2 ** attempt));
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  return data;
+  throw lastErr;
 }
 
 const cachedDbSchemas = new Map();
@@ -443,6 +482,13 @@ async function fetchDbSchema(targetDbId = null) {
   const db = await callNotion(`databases/${currentDbId}`);
   cachedDbSchemas.set(currentDbId, db);
   return db;
+}
+
+// 批次同步結果:成功與失敗分開回報,失敗項目列出原因並提示重試(FR-07:不誤報成功)
+function notionBatchMsg(ok, total, failed) {
+  if (!failed.length) return `✓ 已成功同步 ${ok} / ${total} 題至 Notion！`;
+  const first = failed.slice(0, 3).map((f) => `${f.id}（${f.reason}）`).join('、');
+  return `⚠ 成功 ${ok} 題、失敗 ${failed.length} 題：${first}${failed.length > 3 ? '…' : ''}。失敗的題目尚未標記為已同步，請稍後再按一次重試（已成功的不會重複新增）。`;
 }
 
 async function syncQuestionToNotion(q, p = {}) {
@@ -890,6 +936,7 @@ function runPractice(pool, opts = {}) {
   let right = 0, wrong = 0;
   let showCurrentMeta = false;
   const sessionWrong = [];
+  const scored = new Map(); // 題序 → { k, next }：已計分的題目，重繪時只還原畫面、不再計分
 
   if (!pool.length) {
     view.innerHTML = `
@@ -960,36 +1007,46 @@ function runPractice(pool, opts = {}) {
     };
     view.querySelectorAll('.opt').forEach((btn) =>
       (btn.onclick = () => answer(q, +btn.dataset.k)));
+    if (scored.has(i)) answer(q, scored.get(i).k, true); // 星標／提示／加入複習觸發的重繪：還原作答後畫面
   };
 
-  const answer = (q, k) => {
+  const answer = (q, k, replay = false) => {
+    if (!replay && scored.has(i)) return; // 同一題單次呈現只計分一次
     const p = qp(q.id);
     const correct = k === q.answer;
-    const now = Date.now();
-    ensureQuestionLogs(p, q.id);
-    const logEntry = {
-      id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
-      t: now,
-      c: correct,
-    };
-    p.logs.push(logEntry);
-    p.attempts = p.logs.length;
-    p.lastAnsweredAt = now;
-    p.updatedAt = now;
-    if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
-    p.box = nextBox(p.box, correct);
+    let next = null;
+    if (!replay) {
+      const now = Date.now();
+      ensureQuestionLogs(p, q.id);
+      p.logs.push({
+        id: `${q.id}_${now}_${Math.random().toString(36).slice(2, 8)}`,
+        t: now,
+        c: correct,
+      });
+      p.attempts = p.logs.length;
+      p.lastAnsweredAt = now;
+      p.updatedAt = now;
+      if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
+      p.box = nextBox(p.box, correct);
 
-    const next = calcNextReview(p.reviewStage || (correct ? 1 : 0), correct);
-    p.reviewStage = next.stage;
-    p.reviewDue = next.due;
-    p.reviewUpdatedAt = now;
-    const reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
+      // 複習排程只推進「考生已加入複習」的題目；未加入或已取消者不自動建立（AC-06）
+      if (p.reviewDue) {
+        next = calcNextReview(p.reviewStage || 0, correct);
+        p.reviewStage = next.stage;
+        p.reviewDue = next.due;
+        p.reviewUpdatedAt = now;
+      }
+      logRecent(correct);
+      bumpDaily(correct);
+      save();
+      scored.set(i, { k, next });
+    } else {
+      next = scored.get(i)?.next || null;
+    }
+    const reviewUpdateMsg = !next ? '' : `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
       🧠 遺忘曲線排程：第 ${next.stage} 階段（${next.days} 天後再次複習）
     </span>`;
 
-    logRecent(correct);
-    bumpDaily(correct);
-    save();
     view.querySelectorAll('.opt').forEach((b, idx) => {
       b.disabled = true;
       if (idx === q.answer) b.classList.add('correct');
@@ -1119,7 +1176,8 @@ function runPractice(pool, opts = {}) {
       } catch (err) {
         btn.disabled = false;
         btn.textContent = '📌 存入 Notion';
-        msg.textContent = `失敗：${err.message}`;
+        msg.textContent = `失敗：${err.message}（可再按一次重試）`;
+        save(); // 保留已建立的頁面/區塊對應,重試時不會重複新增
       }
     };
     if ($('#notion-copy-btn')) $('#notion-copy-btn').onclick = async () => {
@@ -1202,168 +1260,6 @@ function runPractice(pool, opts = {}) {
   };
   render();
 };
-    $('#toggle-meta-btn').onclick = () => {
-      showCurrentMeta = !showCurrentMeta;
-      render();
-    };
-    $('#review-btn').onclick = () => {
-      if (p.reviewDue) {
-        delete p.reviewDue;
-        delete p.reviewStage;
-      } else {
-        const next = calcNextReview(0, true);
-        p.reviewStage = next.stage;
-        p.reviewDue = next.due;
-      }
-      save();
-      render();
-    };
-    view.querySelectorAll('.opt').forEach((btn) =>
-      (btn.onclick = () => answer(q, +btn.dataset.k)));
-  };
-  const answer = (q, k) => {
-    const p = qp(q.id);
-    const correct = k === q.answer;
-        p.attempts++;
-    p.lastAnsweredAt = Date.now();
-    if (correct) { p.correct++; right++; } else { p.wrong++; wrong++; sessionWrong.push(q); }
-    p.box = nextBox(p.box, correct);
-
-    // 自動排程遺忘曲線：作答後自動推進或排程複習
-    const next = calcNextReview(p.reviewStage || (correct ? 1 : 0), correct);
-    p.reviewStage = next.stage;
-    p.reviewDue = next.due;
-    const reviewUpdateMsg = `<span class="review-badge ${correct ? '' : 'due'}" style="margin-top:6px;display:inline-block">
-      🧠 遺忘曲線排程：第 ${next.stage} 階段（${next.days} 天後再次複習）
-    </span>`;
-
-    logRecent(correct);
-    bumpDaily(correct);
-    save();
-    view.querySelectorAll('.opt').forEach((b, idx) => {
-      b.disabled = true;
-      if (idx === q.answer) b.classList.add('correct');
-      if (idx === k && !correct) b.classList.add('wrong');
-    });
-
-    // 若有對應的考點心智卡，提供一鍵跳轉查看原理
-    const relatedCards = (GUIDE_DATA.cards || []).filter((c) => {
-      if (q.syllabusItem && c.syllabusItem === q.syllabusItem) return true;
-      const text = `${q.question} ${q.options.join(' ')} ${q.topic || ''}`.toLowerCase();
-      return (c.keywords || []).some((kw) => text.includes(kw.toLowerCase()));
-    });
-    const cardShortcut = relatedCards.length
-      ? `<button class="guide-copy-btn" id="jump-guide-card" style="margin-top:6px">📖 查看此題考點心智卡：${esc(relatedCards[0].title.split('(')[0].trim())}</button>`
-      : '';
-
-    $('#fb').innerHTML = `
-      <p class="${correct ? 'ok' : 'bad'}">${correct ? '答對' : '答錯'}（正解：${esc(q.options[q.answer])}）</p>
-      ${reviewUpdateMsg ? `<div>${reviewUpdateMsg}</div>` : ''}
-      ${q.explanation ? `<p class="exp">${formatExp(q.explanation)}</p>` : ''}
-      ${guideLine(q)}
-      ${cardShortcut ? `<div>${cardShortcut}</div>` : ''}
-      ${reportLink(q)}
-      <div class="notion-row">
-        <button class="notion-btn" id="notion-sync-btn">${p.notionSyncedAt ? '✓ 已在 Notion' : '📌 存入 Notion'}</button>
-        <button class="notion-btn alt" id="notion-copy-btn">📋 複製 Notion 摺疊格式</button>
-        <span id="notion-single-msg" class="muted" style="font-size:12px"></span>
-      </div>
-      <label class="note">筆記<textarea id="note" rows="2" placeholder="寫下你的理解或記憶點…">${esc(p.note || '')}</textarea></label>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
-        <button class="primary" id="next" style="margin:0">${i + 1 < pool.length ? '下一題' : '完成'}</button>
-        ${i + 1 < pool.length ? `<button id="early-finish" style="margin:0;background:#f8fafc;border:1px solid #cbd5e1;color:#475569">提早結束本次練習（已做 ${i + 1} 題）</button>` : ''}
-      </div>`;
-    if ($('#jump-guide-card')) {
-      $('#jump-guide-card').onclick = () => {
-        guideActiveCat = '全部';
-        guideSearchKw = relatedCards[0].title.split(' ')[0];
-        guide();
-      };
-    }
-    if ($('#notion-sync-btn')) $('#notion-sync-btn').onclick = async () => {
-      const btn = $('#notion-sync-btn');
-      const msg = $('#notion-single-msg');
-      const { token, dbId } = getNotionConfig();
-      if (!token || !dbId) {
-        msg.textContent = '請先在「設定」填入 Notion Token 與 Database ID';
-        return;
-      }
-      btn.disabled = true;
-      btn.textContent = '同步中…';
-      try {
-        await syncQuestionToNotion(q, p);
-        p.notionSyncedAt = Date.now();
-        save();
-        btn.textContent = '✓ 已存入 Notion';
-        msg.textContent = '已成功同步至 Notion 資料庫！';
-      } catch (err) {
-        btn.disabled = false;
-        btn.textContent = '📌 存入 Notion';
-        msg.textContent = `失敗：${err.message}`;
-      }
-    };
-    if ($('#notion-copy-btn')) $('#notion-copy-btn').onclick = async () => {
-      const text = toNotionMarkdown([q], { [q.id]: p });
-      try {
-        await navigator.clipboard.writeText(text);
-        $('#notion-single-msg').textContent = '✓ 已複製 Notion Toggle 格式，可直接貼入 Notion！';
-      } catch {
-        $('#notion-single-msg').textContent = '複製失敗';
-      }
-    };
-    if ($('#student-answer')) $('#student-answer').oninput = (e) => { p.studentAnswer = e.target.value; save(); };
-    $('#note').oninput = (e) => { p.note = e.target.value; save(); };
-    if ($('#early-finish')) $('#early-finish').onclick = () => finish();
-    $('#next').onclick = () => { i++; showCurrentMeta = false; i < pool.length ? render() : finish(); };
-  };
-  const finish = () => {
-    pushSync(); // checkpoint:練習完成立即上傳
-    const total = right + wrong;
-    const pct = total ? Math.round((right / total) * 1000) / 10 : 0;
-
-    // 進步的第一性原理是補不會：統計本次錯題落在哪些官方評鑑範圍
-    const wrongByItem = {};
-    for (const wq of sessionWrong) {
-      const key = wq.syllabusItem || wq.chapter || wq.subject;
-      (wrongByItem[key] ||= { chapter: wq.chapter, item: key, qs: [] }).qs.push(wq);
-    }
-    const weakDiagnosticHtml = Object.values(wrongByItem).length ? `
-      <div style="margin:14px 0;padding:12px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px">
-        <h3 style="margin:0 0 6px;color:#b91c1c;font-size:15px">🎯 進步的第一性原理是「補不會」：本次待補強評鑑範圍</h3>
-        <p class="muted" style="margin:0 0 8px;font-size:13px">別無腦刷題！以下是你剛才答錯所對應的官方評鑑內容，點擊可直接針對該範圍全部題目特訓：</p>
-        ${Object.values(wrongByItem).map((g) => {
-          const allInScope = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === g.item);
-          return `<div class="row" style="padding:6px 0;border-top:1px dashed #fca5a5">
-            <span style="font-size:14px"><b>${esc(g.item)}</b> <span class="muted">（本次錯 ${g.qs.length} 題）</span></span>
-            <button class="goto drill-scope-btn" data-scope="${esc(g.item)}" style="background:#fee2e2;color:#b91c1c;font-weight:600">特訓此範圍 (${allInScope.length} 題)</button>
-          </div>`;
-        }).join('')}
-      </div>
-    ` : '';
-
-    view.innerHTML = `
-      <section class="card">
-        <h2>練習完成</h2>
-        <p class="score">${pct}％</p>
-        <p>這組 ${total} 題,答對 ${right}、答錯 ${wrong}</p>
-        ${weakDiagnosticHtml}
-        ${sessionWrong.length ? '<button class="primary" id="redo-wrong">只練這次錯的</button>' : '<p class="muted">這組全對,讚!</p>'}
-        <button id="again">再練一次</button>
-        <button id="back">回首頁</button>
-      </section>`;
-    if (sessionWrong.length) $('#redo-wrong').onclick = () => runPractice(sessionWrong.slice());
-    view.querySelectorAll('.drill-scope-btn').forEach((btn) => {
-      btn.onclick = () => {
-        const sc = btn.dataset.scope;
-        const scopePool = DATA.questions.filter((x) => (x.syllabusItem || x.chapter || x.subject) === sc);
-        runPractice(shuffle(scopePool));
-      };
-    });
-    $('#again').onclick = () => runPractice(shuffle(pool.slice()));
-    $('#back').onclick = home;
-  };
-  render();
-}
 
 let guideActiveCat = '全部';
 let guideSearchKw = '';
@@ -1667,9 +1563,15 @@ function runMock(pool, mins, existingSession = null) {
   clearMockTimer();
   activeMockSessionSaver = saveSession;
 
-  const fmt = () => `${String((remaining / 60) | 0).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`;
+  const fmt = () => { const sec = Math.ceil(remaining); return `${String((sec / 60) | 0).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`; };
+  // 以實際經過時間扣減（單次上限 1.5 秒；分頁隱藏或計時器被節流/凍結時暫停），不依賴回呼次數以免時間漂移
+  let lastTick = Date.now();
+  let submitted = false;
   activeMockTimer = setInterval(() => {
-    remaining--;
+    const nowTick = Date.now();
+    const dt = document.hidden ? 0 : Math.min(nowTick - lastTick, 1500);
+    lastTick = nowTick;
+    remaining = Math.max(0, remaining - dt / 1000);
     const t = $('#timer');
     if (t) t.textContent = fmt();
     if (remaining <= 0) {
@@ -1732,6 +1634,8 @@ function runMock(pool, mins, existingSession = null) {
   };
 
   function submit() {
+    if (submitted) return; // 交卷只結算一次
+    submitted = true;
     activeMockSessionSaver = null;
     clearMockTimer();
     const now = Date.now();
@@ -1948,17 +1852,18 @@ function wrongbook() {
         if (!token || !dbId) { msg.textContent = '請先在「設定」設定 Notion Token 與 Database ID'; return; }
         btn.disabled = true;
         let count = 0;
+        const failed = [];
         for (let idx = 0; idx < filtered.length; idx++) {
           msg.textContent = `同步中 (${idx + 1}/${filtered.length})…`;
           try {
             await syncQuestionToNotion(filtered[idx], qp(filtered[idx].id));
             qp(filtered[idx].id).notionSyncedAt = Date.now();
             count++;
-          } catch (e) { console.warn(e); }
+          } catch (e) { console.warn(e); failed.push({ id: filtered[idx].id, reason: e.message }); }
+          save(); // 每題結束就落地(含新建的頁面 ID),避免中途失敗後重試又新增頁面
         }
-        save();
         btn.disabled = false;
-        msg.textContent = `✓ 已成功同步 ${count} 題錯題至 Notion！`;
+        msg.textContent = notionBatchMsg(count, filtered.length, failed);
       };
     }
     if (filtered.length && $('#notion-wrong-exp')) {
@@ -2036,6 +1941,7 @@ function notes() {
       if (!token || !dbId) { msg.textContent = '請先至「設定」設定 Notion Token 與 Database ID'; return; }
       btn.disabled = true;
       let okCount = 0;
+      const failed = [];
       for (let idx = 0; idx < items.length; idx++) {
         msg.textContent = `正在同步至 Notion (${idx + 1}/${items.length})…`;
         try {
@@ -2044,11 +1950,12 @@ function notes() {
           okCount++;
         } catch (err) {
           console.warn('Sync item failed:', err);
+          failed.push({ id: items[idx].id, reason: err.message });
         }
+        save();
       }
-      save();
       btn.disabled = false;
-      msg.textContent = `✓ 已成功同步 ${okCount} / ${items.length} 題至 Notion 資料庫！`;
+      msg.textContent = notionBatchMsg(okCount, items.length, failed);
     };
   }
 }
@@ -2410,17 +2317,18 @@ function settings() {
       return;
     }
     let ok = 0;
+    const failed = [];
     for (let idx = 0; idx < targetQs.length; idx++) {
       msg.textContent = `正在同步 (${idx + 1}/${targetQs.length})…`;
       try {
         await syncQuestionToNotion(targetQs[idx], qp(targetQs[idx].id));
         qp(targetQs[idx].id).notionSyncedAt = Date.now();
         ok++;
-      } catch (e) { console.warn(e); }
+      } catch (e) { console.warn(e); failed.push({ id: targetQs[idx].id, reason: e.message }); }
+      save();
     }
-    save();
     btn.disabled = false;
-    msg.textContent = `✓ 已成功同步 ${ok} / ${targetQs.length} 題至 Notion！`;
+    msg.textContent = notionBatchMsg(ok, targetQs.length, failed);
   };
   if ($('#exp-notion-all')) $('#exp-notion-all').onclick = () => {
     download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q), 'text/markdown');
@@ -2433,8 +2341,9 @@ function settings() {
     if (!f) return;
     try {
       const s = JSON.parse(await f.text());
-      if (s && s.q) { store = mergeStores(store, s); save(); alert('已匯入並合併進度。'); home(); }
-      else alert('檔案格式不符。');
+      if (s && s.q && typeof s.q === 'object' && !Array.isArray(s.q) && Object.values(s.q).every((v) => v && typeof v === 'object')) {
+        store = mergeStores(store, s); save(); alert('已匯入並合併進度。'); home();
+      } else alert('檔案格式不符（需為本站匯出的進度 JSON），現有進度未變動。');
     } catch { alert('讀取失敗。'); }
   };
   $('#reset').onclick = async () => {

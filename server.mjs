@@ -139,7 +139,8 @@ const server = http.createServer(async (req, res) => {
   const filePath = path.join(__dirname, reqPath);
 
   // 安全性防目錄穿越
-  if (!filePath.startsWith(__dirname)) {
+  const relToRoot = path.relative(__dirname, filePath);
+  if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot) || path.basename(filePath) === 'local-progress.json') {
     res.writeHead(403);
     res.end('Forbidden');
     return;

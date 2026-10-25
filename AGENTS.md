@@ -167,3 +167,13 @@ python3 -m http.server 8000        # 本機開站(fetch 需要 http,不能 file:
 - **答案以官方為準**:`answer` 取自官方公告試題答案,不要憑感覺改。`explanation` 是本站原創。
 - **版權**:題幹是 iPAS 官方公告試題(著作權屬官方);程式碼 MIT。對外散布前自行確認。
 - AI 寫 JSON 時**別在字串裡用半形雙引號 `"`**,要引用改用「」,否則破壞 JSON。
+
+## 學習資料與同步的不變式（審查踩過的坑）
+
+- **合併（`mergeStores`）**：筆記／星標／排程各比**自己的**時間戳（`noteUpdatedAt`／`starredUpdatedAt`／`reviewUpdatedAt`），不可退回 `updatedAt`——作答會更新 `updatedAt`，會靜默蓋掉另一端的筆記。`box`、`history`、`recent` 由合併後的 `logs` 重算，不要各取 max。
+- **練習計分**：同一題單次呈現只計分一次；星標／提示／加入複習會重繪，重繪只還原畫面（`runPractice` 的 `scored`）。
+- **複習排程**：只推進「考生已加入複習」的題目，不在作答時自動建立（否則取消會被復活）；首次排程 1 天。
+- **模考計時**：以實際經過時間扣減、分頁隱藏時暫停，不可用回呼次數。
+- **Notion**：404 先確認資料庫可存取才重建頁面；`notionBlockIds` 未知時留 `undefined`（不是 `[]`）；舊頁面只刪有固定標記的系統區塊。批次同步必須回報失敗項目。
+- 改以上任一項，對應測試在 `core.test.mjs`「本輪審查補強」與 `notion_sync.test.mjs` 案例 12–15。
+- **語法檢查**：`node --check app.js` 不會把 `.js` 當 ES module 解析，曾放過一段殘留的重複程式碼（整站白屏）。`core.test.mjs` 已內建 module 語法硬檢查；手動檢查請先複製成 `.mjs`。

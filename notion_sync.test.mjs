@@ -14,6 +14,12 @@ function createMockNotionServer() {
   const mockCallNotion = async (endpoint, { method = 'GET', body = null } = {}) => {
     calls.push({ endpoint, method, body });
 
+    // 0. GET databases/:id (確認資料庫可存取；dbId 含 'lost' 模擬未分享)
+    if (endpoint.startsWith('databases/') && method === 'GET') {
+      if (endpoint.includes('lost')) { const err = new Error('Object not found'); err.status = 404; err.code = 'object_not_found'; throw err; }
+      return { id: endpoint.replace('databases/', ''), properties: {} };
+    }
+
     // 1. POST pages (建立新頁面)
     if (endpoint === 'pages' && method === 'POST') {
       const pageId = 'page-' + Math.random().toString(36).slice(2, 9);
@@ -363,6 +369,62 @@ const sampleQ = {
   assert.equal(mock.pages.get(p.notionPageId).parent.database_id, 'db-new-target');
   // 舊資料庫中的頁面依然完整保留
   assert.ok(mock.pages.has(db1PageId), '原資料庫頁面應獨立保留');
+}
+
+// 案例 12：頁面與資料庫都 404（未分享給 Integration）不可新增重複頁面，且保留原頁面關聯 (FR-07)
+{
+  const mock = createMockNotionServer();
+  const p = { notionPageId: 'page-deleted', notionDbId: 'db-lost', box: 1, note: '權限失效' };
+  await assert.rejects(
+    () => syncQuestionToNotion(sampleQ, p, { dbId: 'db-lost', callNotion: mock.mockCallNotion }),
+    (e) => e.code === 'access_lost',
+  );
+  assert.equal(mock.pages.size, 0, '授權失效不可新增頁面');
+  assert.equal(p.notionPageId, 'page-deleted', '保留原頁面關聯供授權恢復後重試');
+}
+
+// 案例 13：舊版頁面中考生自己的標題／段落即使含「題目」或以 A. 開頭，也不可被誤刪 (FR-07)
+{
+  const mock = createMockNotionServer();
+  const pageId = 'page-legacy-user';
+  mock.pages.set(pageId, { id: pageId, properties: {} });
+  mock.blocks.set('u-h', { id: 'u-h', parentId: pageId, type: 'heading_3', heading_3: { rich_text: [{ plain_text: '我的題目整理' }] } });
+  mock.blocks.set('u-p', { id: 'u-p', parentId: pageId, type: 'paragraph', paragraph: { rich_text: [{ plain_text: 'A. 我覺得這個選項是陷阱' }] } });
+  mock.blocks.set('u-t', { id: 'u-t', parentId: pageId, type: 'toggle', toggle: { rich_text: [{ plain_text: '我的解析筆記' }] } });
+  mock.pageChildren.set(pageId, ['u-h', 'u-p', 'u-t']);
+  const p = { notionPageId: pageId, box: 1 };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+  for (const id of ['u-h', 'u-p', 'u-t']) assert.ok(mock.blocks.has(id), '考生內容不可被刪：' + id);
+}
+
+// 案例 14：建立頁面後讀不到區塊 ID，不可記成 []（會使之後永遠不清舊內容、重複追加）
+{
+  const mock = createMockNotionServer();
+  const failing = async (endpoint, opts = {}) => {
+    if (endpoint.includes('/children') && (opts.method || 'GET') === 'GET') { const e = new Error('boom'); e.status = 500; throw e; }
+    return mock.mockCallNotion(endpoint, opts);
+  };
+  const p = { box: 1, note: 'x' };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: failing });
+  assert.equal(p.notionBlockIds, undefined, '未知區塊 ID 必須是 undefined 以觸發頁面掃描');
+  const before = mock.pageChildren.get(p.notionPageId).length;
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-test-1', callNotion: mock.mockCallNotion });
+  assert.equal(mock.pageChildren.get(p.notionPageId).length, before, '第二次同步後正文不得重複');
+}
+
+// 案例 15：切換資料庫但新資料庫建立失敗，不得遺失原頁面關聯
+{
+  const mock = createMockNotionServer();
+  const p = { box: 1, note: 'x' };
+  await syncQuestionToNotion(sampleQ, p, { dbId: 'db-original', callNotion: mock.mockCallNotion });
+  const pid = p.notionPageId;
+  const failPost = async (endpoint, opts = {}) => {
+    if (endpoint === 'pages' && opts.method === 'POST') { const e = new Error('500'); e.status = 500; throw e; }
+    return mock.mockCallNotion(endpoint, opts);
+  };
+  await assert.rejects(() => syncQuestionToNotion(sampleQ, p, { dbId: 'db-new', callNotion: failPost }));
+  assert.equal(p.notionPageId, pid);
+  assert.equal(p.notionDbId, 'db-original');
 }
 
 console.log('PASS (Notion 正文原子更新、內容保護與錯誤處理測試)');

@@ -3,7 +3,7 @@
 import { ApplicationServerKeys, generatePushHTTPRequest } from 'webpush-webcrypto';
 
 const CODE_RE = /^[a-z]+-[a-z]+-\d{2,4}$/i;
-const MAX_BYTES = 256 * 1024;
+const MAX_BYTES = 1024 * 1024; // 作答事件 logs 會隨使用累積,256KB 不夠;D1 單列上限 2MB
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',

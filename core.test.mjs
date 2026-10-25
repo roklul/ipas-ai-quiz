@@ -443,7 +443,64 @@ assert.deepEqual(mergedWithReset2.recent, []);
 assert.equal(mergedWithReset2.daily, null);
 assert.equal(mergedWithReset2.streak.count, 0);
 
+// ---- 本輪審查補強:欄位時間戳、箱位重播、日統計與 recent 由事件重算 ----
+{
+  const mkS = (q, extra = {}) => ({ q, updatedAt: 0, ...extra });
+  // 單純作答不得蓋掉另一端的筆記／星標
+  const A = mkS({ x: { box: 1, attempts: 0, correct: 0, wrong: 0, note: '重要筆記', noteUpdatedAt: 100, starred: true, starredUpdatedAt: 100, updatedAt: 100 } }, { updatedAt: 100 });
+  const B = mkS({ x: { box: 2, attempts: 1, correct: 1, wrong: 0, logs: [{ id: 'b1', t: 200, c: true }], lastAnsweredAt: 200, updatedAt: 200 } }, { updatedAt: 200 });
+  for (const m of [mergeStores(A, B), mergeStores(B, A)]) {
+    assert.equal(m.q.x.note, '重要筆記', '作答不得蓋掉筆記');
+    assert.equal(m.q.x.starred, true, '作答不得蓋掉星標');
+  }
+  // 兩端各答對一次 → 合併後 box 由事件重播 = 3 (已掌握)
+  const C = mkS({ x: { box: 2, attempts: 1, correct: 1, wrong: 0, logs: [{ id: 'a', t: 100, c: true }], lastAnsweredAt: 100, updatedAt: 100 } });
+  const D = mkS({ x: { box: 2, attempts: 1, correct: 1, wrong: 0, logs: [{ id: 'b', t: 200, c: true }], lastAnsweredAt: 200, updatedAt: 200 } });
+  assert.equal(mergeStores(C, D).q.x.box, 3);
+  assert.equal(mergeStores(D, C).q.x.box, 3);
+  // AC-07 同日兩端各答一題:history 應為 2 次、答對 1;recent 兩筆;反覆合併不變
+  const t0 = new Date(2026, 9, 25, 10).getTime();
+  const day = '2026-10-25';
+  const E = mkS({ x: { box: 2, attempts: 1, correct: 1, wrong: 0, logs: [{ id: 'e', t: t0, c: true }], lastAnsweredAt: t0, updatedAt: t0 } }, { history: { [day]: { a: 1, c: 1 } }, recent: [1], updatedAt: t0 });
+  const F = mkS({ x: { box: 1, attempts: 1, correct: 0, wrong: 1, logs: [{ id: 'f', t: t0 + 1000, c: false }], lastAnsweredAt: t0 + 1000, updatedAt: t0 + 1000 } }, { history: { [day]: { a: 1, c: 0 } }, recent: [0], updatedAt: t0 + 1000 });
+  const EF = mergeStores(E, F, day);
+  assert.deepEqual(EF.history[day], { a: 2, c: 1 });
+  assert.deepEqual(EF.recent, [1, 0]);
+  assert.equal(EF.q.x.attempts, 2);
+  const EF2 = mergeStores(EF, F, day);
+  assert.deepEqual(EF2.history[day], { a: 2, c: 1 }, '反覆同步數字不變');
+  assert.deepEqual(EF2.recent, [1, 0]);
+  // 重設後 recent 不被舊備份復活,且重設後的新作答保留
+  const R = mkS({}, { statsResetAt: t0 + 500, recent: [], history: {}, updatedAt: t0 + 500 });
+  assert.deepEqual(mergeStores(R, E, day).recent, []);
+  // Notion 機敏設定不可被合併帶回
+  const S = mergeStores(mkS({}), { q: {}, settings: { notionToken: 'secret', dailyGoal: 5 }, updatedAt: 9 });
+  assert.equal(S.settings.notionToken, undefined);
+  assert.equal(S.settings.dailyGoal, 5);
+  // 首次複習排程 = 1 天,答對推進到 3 天
+  assert.equal(calcNextReview(0, true).days, 1);
+  assert.equal(calcNextReview(1, true).days, 3);
+  assert.equal(calcNextReview(3, false).days, 1);
+}
+
 console.log('PASS (含 mergeStores 統計自洽快照、舊版遷移與重設全隔離測試)');
+
+// ---- 語法硬檢查:app.js / core.js 必須能以 ES module 解析 ----
+// 歷史教訓:app.js 曾殘留一段重複的舊程式碼導致整站白屏,但 `node --check app.js` 照樣通過(不會當 module 解析)。
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, copyFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+{
+  const dir = mkdtempSync(join(tmpdir(), 'ipas-syntax-'));
+  try {
+    for (const f of ['app.js', 'core.js', 'server.mjs', 'sw.js']) {
+      const copy = join(dir, f.replace(/.js$/, '.mjs'));
+      copyFileSync(new URL('./' + f, import.meta.url), copy);
+      execFileSync(process.execPath, ['--check', copy], { stdio: 'pipe' });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
 
 // 引入 Notion 正文原子更新、錯誤傳遞與狀態防護測試
 import './notion_sync.test.mjs';

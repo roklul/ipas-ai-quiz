@@ -526,26 +526,26 @@ export function ensureQuestionLogs(p, qid) {
   }
 }
 
-// 辨識系統自動產生之區塊，保守保留考生自行在 Notion 頁面內新增的內容 (FR-07, AC-09)
+// 辨識系統自動產生之區塊（舊版頁面沒有 notionBlockIds 時的保守判斷）(FR-07, AC-09)
+// 只認系統寫入的固定標記；寧可漏刪（重複內容）也不可誤刪考生自己在頁面內新增的內容。
 export function isSystemManagedBlock(b, q = {}) {
   if (!b || !b.type) return false;
   const content = (b[b.type]?.rich_text || [])
     .map((t) => t.plain_text || t.text?.content || '')
-    .join('');
+    .join('')
+    .trim();
 
   if (b.type === 'callout') {
-    if (content.includes('考點與關鍵字') || b.callout?.icon?.emoji === '💡') return true;
+    if (b.callout?.icon?.emoji === '💡' && content.startsWith('考點與關鍵字')) return true;
   }
   if (b.type === 'heading_3') {
-    if (content.includes('【題目】') || content.includes('題目')) return true;
+    if (content === '【題目】') return true;
   }
   if (b.type === 'toggle') {
-    if (content.includes('點擊查看答案') || content.includes('解析') || content.includes('AI 檢查')) return true;
+    if (content.startsWith('▶️ 點擊查看答案、考生回答與 AI 檢查解析')) return true;
   }
   if (b.type === 'paragraph') {
-    const qStem = (q.question || '').slice(0, 15);
-    if (qStem && content.includes(qStem)) return true;
-    if (/^[A-D]\.\s/.test(content.trim())) return true;
+    if (q.question && content === q.question.trim()) return true;
   }
   return false;
 }
@@ -558,6 +558,8 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
   out.cards ||= {};
   out.history ||= {};
   out.settings = { ...(incoming.settings || {}), ...(out.settings || {}) };
+  const stripSecrets = () => { if (out.settings) { delete out.settings.notionToken; delete out.settings.notionDbId; delete out.settings.notionProxy; } };
+  stripSecrets();
 
   // 重設版本隔離 (AC-08): 取兩端較新之重設時間戳
   const resetAt = Math.max(target.statsResetAt || 0, incoming.statsResetAt || 0);
@@ -566,6 +568,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
   if ((incoming.updatedAt || 0) > (out.updatedAt || 0)) {
     out.settings = { ...(out.settings || {}), ...(incoming.settings || {}) };
     if (incoming.syncCode) out.syncCode = incoming.syncCode;
+    stripSecrets();
   }
 
   // 1. 合併每題進度 q：同時遍歷 target 與 incoming 之所有題目 (兩端全集)，杜絕遠端重設刪除之題目被復活
@@ -668,24 +671,32 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
       finalLastAnsweredAt = statsValid ? (stats.lastAnsweredAt || 0) : 0;
     }
 
-    // 箱位決定：以較新之作答紀錄為準
+    // 箱位決定：有事件紀錄就重播（與次數自洽）；含舊版遷移紀錄時無法重播，退回以較新作答端為準
     const tAnsTime = tp.lastAnsweredAt || tp.updatedAt || 0;
     const iAnsTime = ip.lastAnsweredAt || ip.updatedAt || 0;
     const boxWinner = (iAnsTime >= tAnsTime) ? ip : tp;
+    const hasLegacyLog = mergedLogs.some((l) => String(l.id).startsWith('legacy_'));
+    const finalBox = (mergedLogs.length && !hasLegacyLog)
+      ? mergedLogs.reduce((bx, l) => nextBox(bx, l.c), 1)
+      : (boxWinner.box || 1);
 
-    // B. 筆記與解題思路：依 noteUpdatedAt（或 updatedAt）較新者為準，允許清空刪除
-    const tNoteTime = tp.noteUpdatedAt || tp.updatedAt || 0;
-    const iNoteTime = ip.noteUpdatedAt || ip.updatedAt || 0;
+    // 各欄位只比自己的時間戳；缺時間戳的舊資料僅在該欄有內容時才用 updatedAt 當後備，
+    // 否則「單純作答而更新 updatedAt」會蓋掉另一端真正的筆記／星標／排程
+    const fieldTime = (x, key, hasValue) => x[key] || (hasValue ? (x.updatedAt || 0) : 0);
+
+    // B. 筆記與解題思路：依 noteUpdatedAt 較新者為準，允許清空刪除
+    const tNoteTime = fieldTime(tp, 'noteUpdatedAt', tp.note || tp.studentAnswer);
+    const iNoteTime = fieldTime(ip, 'noteUpdatedAt', ip.note || ip.studentAnswer);
     const noteWinner = (iNoteTime > tNoteTime) ? ip : tp;
 
-    // C. 星標標記：依 starredUpdatedAt（或 updatedAt）較新者為準，允許取消星標
-    const tStarTime = tp.starredUpdatedAt || tp.updatedAt || 0;
-    const iStarTime = ip.starredUpdatedAt || ip.updatedAt || 0;
+    // C. 星標標記：依 starredUpdatedAt 較新者為準，允許取消星標
+    const tStarTime = fieldTime(tp, 'starredUpdatedAt', tp.starred);
+    const iStarTime = fieldTime(ip, 'starredUpdatedAt', ip.starred);
     const starWinner = (iStarTime > tStarTime) ? ip : tp;
 
-    // D. 遺忘曲線排程：依 reviewUpdatedAt（或 updatedAt）較新者為準
-    const tRevTime = tp.reviewUpdatedAt || tp.updatedAt || 0;
-    const iRevTime = ip.reviewUpdatedAt || ip.updatedAt || 0;
+    // D. 遺忘曲線排程：依 reviewUpdatedAt 較新者為準（取消排程也有時間戳，不會被舊資料恢復）
+    const tRevTime = fieldTime(tp, 'reviewUpdatedAt', tp.reviewDue);
+    const iRevTime = fieldTime(ip, 'reviewUpdatedAt', ip.reviewDue);
     const revWinner = (iRevTime > tRevTime) ? ip : tp;
 
     // E. Notion 頁面關聯與管理區塊 ID
@@ -695,7 +706,7 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     const notionSyncedAt = Math.max(tp.notionSyncedAt || 0, ip.notionSyncedAt || 0);
 
     out.q[qid] = {
-      box: boxWinner.box || 1,
+      box: finalBox,
       attempts: finalAttempts,
       correct: finalCorrect,
       wrong: finalWrong,
@@ -756,6 +767,28 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     }
   }
 
+  // 3b. 由合併後的作答事件重算每日歷史與近期紀錄，確保與 attempts 同源（AC-07：兩端同日各答一次 = 2）
+  let derivedRecent = false;
+  {
+    const ymdLocal = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const allLogs = [];
+    const perDay = {};
+    for (const p of Object.values(out.q)) {
+      for (const l of (p.logs || [])) {
+        if (String(l.id).startsWith('legacy_')) continue; // 遷移用基準紀錄沒有真實日期，不納入日統計
+        allLogs.push(l);
+        const d = (perDay[ymdLocal(l.t)] ||= { a: 0, c: 0 });
+        d.a++; if (l.c) d.c++;
+      }
+    }
+    for (const [d, v] of Object.entries(perDay)) {
+      const cur = out.history[d];
+      out.history[d] = cur ? { a: Math.max(cur.a || 0, v.a), c: Math.max(cur.c || 0, v.c) } : v;
+    }
+    allLogs.sort((x, y) => x.t - y.t);
+    if (allLogs.length) { out.recent = allLogs.slice(-50).map((l) => (l.c ? 1 : 0)); derivedRecent = true; }
+  }
+
   // 4. 今日題數 store.daily 與 history[todayStr] 同步
   const t = todayStr;
   const todayHistA = (out.history[t] && out.history[t].a) || 0;
@@ -792,11 +825,12 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
   }
 
   // 6. 近期作答紀錄 recent (過濾 resetAt 以前之紀錄)
-  let candidateRecent = (out.recent && out.recent.length) ? out.recent : (incoming.recent || []);
-  if (resetAt > 0) {
-    candidateRecent = candidateRecent.filter((r) => ((r.t || r.timestamp || 0) > resetAt));
+  if (!derivedRecent) {
+    // 無事件紀錄可重算（純舊版資料）：沿用現有清單；有重設時無時間戳的舊項目不可復活
+    let candidateRecent = (out.recent && out.recent.length) ? out.recent : (incoming.recent || []);
+    if (resetAt > 0) candidateRecent = candidateRecent.filter((r) => r && typeof r === 'object' && ((r.t || r.timestamp || 0) > resetAt));
+    out.recent = candidateRecent.slice(-50);
   }
-  out.recent = candidateRecent.slice(-50);
 
   out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
   return out;
@@ -809,6 +843,7 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
   const payload = buildNotionPagePayload(q, p, dbId, schema);
 
   // 依資料庫隔離 (AC-09): 若題目曾同步至其他資料庫，更換資料庫時不可覆寫原資料庫頁面
+  const prevMapping = { notionPageId: p.notionPageId, notionBlockIds: p.notionBlockIds, notionDbId: p.notionDbId };
   if (p.notionPageId && p.notionDbId && p.notionDbId !== dbId) {
     delete p.notionPageId;
     delete p.notionBlockIds;
@@ -828,6 +863,18 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
       // 僅在頁面本身明確 404 (object_not_found) 時，重設 ID 降級為重新建立頁面
       const isNotFound = pageErr.status === 404 || pageErr.code === 'object_not_found' || /not_found/i.test(pageErr.message || '');
       if (isNotFound) {
+        // Notion 對「已刪除」與「未分享給 Integration」都回 object_not_found：
+        // 先確認資料庫仍可存取，才當作頁面已刪除重建；否則視為授權／分享問題，不新增重複頁面。
+        try {
+          await callNotion(`databases/${dbId}`);
+        } catch (dbErr) {
+          if (dbErr.status === 404 || dbErr.code === 'object_not_found') {
+            const e = new Error('找不到此頁面與資料庫：請確認 Integration 已被分享到該資料庫（Connections），或 Database ID 是否正確。');
+            e.status = 404; e.code = 'access_lost';
+            throw e;
+          }
+          throw dbErr;
+        }
         delete p.notionPageId;
         delete p.notionBlockIds;
       } else {
@@ -890,7 +937,14 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
   }
 
   // 首次建立頁面
-  const result = await callNotion('pages', { method: 'POST', body: payload });
+  let result;
+  try {
+    result = await callNotion('pages', { method: 'POST', body: payload });
+  } catch (createErr) {
+    Object.assign(p, prevMapping); // 建立失敗：還原原有對應，不遺失舊資料庫的頁面關聯
+    for (const k of Object.keys(prevMapping)) if (prevMapping[k] === undefined) delete p[k];
+    throw createErr;
+  }
   if (result && result.id) {
     p.notionPageId = result.id;
     p.notionDbId = dbId;
@@ -900,7 +954,8 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
         const blkRes = await callNotion(`blocks/${result.id}/children?page_size=100`);
         p.notionBlockIds = (blkRes?.results || []).map((b) => b.id);
       } catch {
-        // non-blocking
+        // 取不到區塊 ID：留空（undefined）而非 []，下次同步會掃描頁面辨識系統區塊，避免永遠不清舊內容而重複追加
+        delete p.notionBlockIds;
       }
     }
   }
