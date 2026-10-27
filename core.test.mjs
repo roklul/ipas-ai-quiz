@@ -72,6 +72,19 @@ assert.equal(payload.parent.database_id, 'test-db-id');
 assert.ok(payload.properties.Name.title[0].text.content.includes('偏差與變異權衡'));
 assert.equal(payload.properties.Level.select.name, '初級');
 assert.ok(payload.children.some((c) => c.type === 'toggle'));
+const toggleBlock = payload.children.find((c) => c.type === 'toggle');
+assert.ok(toggleBlock.toggle.children.some((b) => b.type === 'paragraph' && b.paragraph.rich_text[0].text.content.includes('個人筆記：重點筆記')), '單獨提供筆記時應以個人筆記區塊寫入');
+assert.ok(!toggleBlock.toggle.children.some((b) => b.type === 'quote'), '無思路時不應產生假思路引用區塊');
+
+// 測試同時提供思路與筆記時，兩者皆獨立寫入
+const payloadBoth = buildNotionPagePayload(
+  { id: 't2', level: '初級', subject: '科目2：生成式AI', chapter: 'L121', question: '題目', options: ['A','B','C','D'], answer: 0, explanation: '詳解' },
+  { box: 1, studentAnswer: '我的思考過程', note: '補充備註' },
+  'test-db-id'
+);
+const toggleBoth = payloadBoth.children.find((c) => c.type === 'toggle');
+assert.ok(toggleBoth.toggle.children.some((b) => b.type === 'quote' && b.quote.rich_text[0].text.content.includes('我的思考過程')), '思路正確寫入引用區塊');
+assert.ok(toggleBoth.toggle.children.some((b) => b.type === 'paragraph' && b.paragraph.rich_text[0].text.content.includes('補充備註')), '筆記正確寫入個人筆記區塊');
 
 console.log('PASS');
 

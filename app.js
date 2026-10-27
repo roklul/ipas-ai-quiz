@@ -1091,7 +1091,11 @@ function runPractice(pool, opts = {}) {
       </div>
 
       <div class="notion-row">
-        <button class="notion-btn" id="notion-sync-btn">${p.notionSyncedAt ? '✓ 已在 Notion' : '📌 存入 Notion'}</button>
+        <button class="notion-btn" id="notion-sync-btn">${
+          p.notionSyncedAt
+            ? ((p.noteUpdatedAt || 0) > p.notionSyncedAt ? '🔄 更新至 Notion' : '✓ 已在 Notion')
+            : '📌 存入 Notion'
+        }</button>
         <button class="notion-btn alt" id="notion-copy-btn">📋 複製 Notion 摺疊格式</button>
         <span id="notion-single-msg" class="muted" style="font-size:12px"></span>
       </div>
@@ -1174,16 +1178,18 @@ function runPractice(pool, opts = {}) {
       btn.textContent = '同步中…';
       try {
         await syncQuestionToNotion(q, p);
-        p.notionSyncedAt = Date.now();
-        p.updatedAt = Date.now();
+        const now = Date.now();
+        p.notionSyncedAt = now;
+        p.updatedAt = now;
         save();
-        btn.textContent = '✓ 已存入 Notion';
-        msg.textContent = '已成功同步至 Notion 資料庫！';
+        btn.disabled = false;
+        btn.textContent = '✓ 已在 Notion';
+        msg.textContent = '已成功寫入 Notion 資料庫（含題目、選項、正解與詳解）！';
       } catch (err) {
         btn.disabled = false;
-        btn.textContent = '📌 存入 Notion';
+        btn.textContent = p.notionSyncedAt ? '🔄 更新至 Notion' : '📌 存入 Notion';
         msg.textContent = `失敗：${err.message}（可再按一次重試）`;
-        save(); // 保留已建立的頁面/區塊對應,重試時不會重複新增
+        save();
       }
     };
     if ($('#notion-copy-btn')) $('#notion-copy-btn').onclick = async () => {
@@ -1202,6 +1208,10 @@ function runPractice(pool, opts = {}) {
         p.noteUpdatedAt = now;
         p.updatedAt = now;
         save();
+        if (p.notionSyncedAt && $('#notion-sync-btn')) {
+          $('#notion-sync-btn').textContent = '🔄 更新至 Notion';
+          if ($('#notion-single-msg')) $('#notion-single-msg').textContent = '思路已修改，點擊更新 Notion';
+        }
       };
     }
     $('#note').oninput = (e) => {
@@ -1210,6 +1220,10 @@ function runPractice(pool, opts = {}) {
       p.noteUpdatedAt = now;
       p.updatedAt = now;
       save();
+      if (p.notionSyncedAt && $('#notion-sync-btn')) {
+        $('#notion-sync-btn').textContent = '🔄 更新至 Notion';
+        if ($('#notion-single-msg')) $('#notion-single-msg').textContent = '筆記已修改，點擊更新 Notion';
+      }
     };
     if ($('#early-finish')) $('#early-finish').onclick = () => finish();
     $('#next').onclick = () => {
@@ -1911,7 +1925,11 @@ function notes() {
         return `<div class="note-item">
           <div class="row"><span class="muted">${p.starred ? '⭐ ' : ''}${esc(q.subject)}</span>
             <span>
-              <button class="notion-btn" style="padding:4px 9px!important;font-size:12px!important" data-id="${esc(q.id)}">📌 存入 Notion</button>
+              <button class="notion-btn" style="padding:4px 9px!important;font-size:12px!important" data-id="${esc(q.id)}">${
+                p.notionSyncedAt
+                  ? ((p.noteUpdatedAt || 0) > p.notionSyncedAt ? '🔄 更新至 Notion' : '✓ 已在 Notion')
+                  : '📌 存入 Notion'
+              }</button>
               <button class="goto" data-id="${esc(q.id)}">前往該題</button>
             </span>
           </div>

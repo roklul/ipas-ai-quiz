@@ -204,7 +204,7 @@ export function buildNotionPagePayload(q, p = {}, dbId, dbSchema = null) {
     ...optionBlocks,
   ];
 
-  if (p && (p.studentAnswer || p.note)) {
+  if (p && p.studentAnswer) {
     toggleChildren.push({
       object: 'block',
       type: 'quote',
@@ -213,7 +213,7 @@ export function buildNotionPagePayload(q, p = {}, dbId, dbSchema = null) {
           {
             type: 'text',
             text: {
-              content: `【考生回答 / 解題思路】\n${(p.studentAnswer || p.note || '').slice(0, 1900)}`,
+              content: `【考生回答 / 解題思路】\n${p.studentAnswer.slice(0, 1900)}`,
             },
           },
         ],
@@ -237,7 +237,7 @@ export function buildNotionPagePayload(q, p = {}, dbId, dbSchema = null) {
     });
   }
 
-  if (p && p.note && p.studentAnswer) {
+  if (p && p.note) {
     toggleChildren.push({
       object: 'block',
       type: 'paragraph',
