@@ -799,115 +799,129 @@ function home() {
   $('#pr-start').onclick = () => {
     const count = +$('#pr-count').value;
     const mode = $('#pr-mode').value;
-    let pool = pickPool();
-    if (!pool.length) {
-      alert('所選範圍目前沒有符合條件的題目！');
-      return;
-    }
 
-    const now = Date.now();
-    const COOLDOWN_MS = 20 * 60 * 1000; // 20 分鐘冷卻期（避免剛做完的題目立刻又在下一輪出現）
+    const startPracticeSession = () => {
+      let pool = pickPool();
+      if (!pool.length) {
+        alert('所選範圍目前沒有符合條件的題目！');
+        return;
+      }
 
-    if (mode === 'smart') {
-      // 智慧排程：解決「總感覺一直重複練一樣題目」的根本問題
-      // 1. 分流題目池
-      const activeWrong = []; // Box 1 且未在冷卻中的錯題
-      const newQuestions = []; // 從沒做過的新題
-      const reviewing = []; // Box 2 進入鞏固期且未在冷卻中的題目
-      const mastered = []; // Box 3 已掌握的題目
-      const coolingDown = []; // 剛在 20 分鐘內做過、冷卻中的題目
+      const now = Date.now();
+      const COOLDOWN_MS = 20 * 60 * 1000; // 20 分鐘冷卻期（剛做完的題目在冷卻期間絕不出現在下一輪練習）
 
-      for (const q of pool) {
-        const p = store.q[q.id];
-        if (!p || (p.attempts || 0) === 0) {
-          newQuestions.push(q);
-        } else if (p.lastAnsweredAt && now - p.lastAnsweredAt < COOLDOWN_MS) {
-          coolingDown.push(q);
-        } else if (isMastered(p.box)) {
-          mastered.push(q);
-        } else if (p.box === 1 && p.wrong > 0) {
-          activeWrong.push(q);
+      if (mode === 'smart') {
+        // 智慧排程：徹底解決「總感覺一直重複練一樣題目」
+        const activeWrong = []; // Box 1 且未在冷卻中的錯題
+        const newQuestions = []; // 從沒做過的新題
+        const reviewing = []; // Box 2 進入鞏固期且未在冷卻中的題目
+        const mastered = []; // Box 3 已掌握的題目
+        const coolingDown = []; // 剛在 20 分鐘內做過、冷卻中的題目
+
+        for (const q of pool) {
+          const p = store.q[q.id];
+          if (!p || (p.attempts || 0) === 0) {
+            newQuestions.push(q);
+          } else if (p.lastAnsweredAt && now - p.lastAnsweredAt < COOLDOWN_MS) {
+            coolingDown.push(q);
+          } else if (isMastered(p.box)) {
+            mastered.push(q);
+          } else if (p.box === 1 && p.wrong > 0) {
+            activeWrong.push(q);
+          } else {
+            reviewing.push(q);
+          }
+        }
+
+        // 嚴格冷卻保護：只要還有新題目，冷卻中的題目絕不提前釋放！只有在題目池已無任何新題時才放寬
+        const availableWrong = activeWrong.length
+          ? activeWrong
+          : (newQuestions.length === 0 ? coolingDown.filter(q => (store.q[q.id]?.box === 1 && store.q[q.id]?.wrong > 0)) : []);
+        const availableReview = reviewing.length
+          ? reviewing
+          : (newQuestions.length === 0 ? coolingDown.filter(q => (store.q[q.id]?.box === 2)) : []);
+
+        if (count > 0) {
+          // 若有可用的複習題，最多佔 30%~40%，其餘全部出新題目
+          const maxReviewCount = (availableWrong.length || availableReview.length)
+            ? Math.max(1, Math.round(count * 0.35))
+            : 0;
+
+          const reviewPicks = shuffle([...availableWrong, ...availableReview]).slice(0, maxReviewCount);
+          const newPicks = shuffle(newQuestions).slice(0, count - reviewPicks.length);
+
+          let finalPool = [...reviewPicks, ...newPicks];
+
+          // 若新題與複習題不足指定題數，優先從「不在冷卻中的已掌握題」補齊，避免重複剛做過的題目
+          if (finalPool.length < count) {
+            const pickedIds = new Set(finalPool.map(q => q.id));
+            const notCoolingRemaining = shuffle(pool.filter(q => !pickedIds.has(q.id) && (!store.q[q.id]?.lastAnsweredAt || now - store.q[q.id].lastAnsweredAt >= COOLDOWN_MS)));
+            finalPool = finalPool.concat(notCoolingRemaining.slice(0, count - finalPool.length));
+          }
+
+          // 真的全池都練完且全都在 20 分鐘冷卻中時，才以剩餘題目補滿
+          if (finalPool.length < count) {
+            const pickedIds = new Set(finalPool.map(q => q.id));
+            const remainingPool = shuffle(pool.filter(q => !pickedIds.has(q.id)));
+            finalPool = finalPool.concat(remainingPool.slice(0, count - finalPool.length));
+          }
+
+          pool = shuffle(finalPool);
         } else {
-          reviewing.push(q);
+          // 全卷模式：未冷卻錯題 ➔ 新題 ➔ 未冷卻鞏固題 ➔ 已掌握 ➔ 冷卻題
+          pool = [
+            ...shuffle(availableWrong),
+            ...shuffle(newQuestions),
+            ...shuffle(availableReview),
+            ...shuffle(mastered)
+          ];
         }
-      }
-
-      // 如果全部題目都還在冷卻中（題目池很小），則釋放冷卻題目
-      const availableWrong = activeWrong.length ? activeWrong : coolingDown.filter(q => (store.q[q.id]?.box === 1 && store.q[q.id]?.wrong > 0));
-      const availableReview = reviewing.length ? reviewing : coolingDown.filter(q => (store.q[q.id]?.box === 2));
-
-      // 若指定題數（如 10 題、20 題、25 題）
-      if (count > 0) {
-        // 黃金配比：最多 30%~40% 錯題/複習題 + 60%~70% 新題目
-        const maxReviewCount = Math.max(1, Math.round(count * 0.35));
-
-        // 挑選複習題（錯題優先，其次鞏固題）
-        const reviewPicks = shuffle([...availableWrong, ...availableReview]).slice(0, maxReviewCount);
-        // 挑選新題
-        const newPicks = shuffle(newQuestions).slice(0, count - reviewPicks.length);
-
-        let finalPool = [...reviewPicks, ...newPicks];
-
-        // 若新題或複習題不夠填滿 count，用剩餘可用題（已掌握或冷卻題）隨機補齊
-        if (finalPool.length < count) {
-          const pickedIds = new Set(finalPool.map(q => q.id));
-          const remainingPool = shuffle(pool.filter(q => !pickedIds.has(q.id)));
-          finalPool = finalPool.concat(remainingPool.slice(0, count - finalPool.length));
+      } else if (mode === 'new') {
+        // 只練新題
+        const newQs = pool.filter(q => !store.q[q.id] || (store.q[q.id].attempts || 0) === 0);
+        if (!newQs.length) {
+          alert('恭喜！所選範圍的所有題目你都已經至少做過一次！已為你切換為複習練習。');
+          pool = shuffle(pool);
+        } else {
+          pool = shuffle(newQs);
         }
+        if (count) pool = pool.slice(0, count);
+      } else if (mode === 'wrong') {
+        // 只練當前錯題
+        const wrongQs = pool.filter(q => {
+          const p = store.q[q.id];
+          return p && p.box < 3 && (p.wrong || 0) > 0;
+        });
+        if (!wrongQs.length) {
+          alert('所選範圍目前沒有待複習的錯題！已自動為你挑選新題目。');
+          pool = shuffle(pool);
+        } else {
+          pool = shuffle(wrongQs);
+        }
+        if (count) pool = pool.slice(0, count);
+      } else if (mode === 'ebbinghaus') {
+        // 遺忘曲線到期題
+        const dueQs = pool.filter(q => {
+          const p = store.q[q.id];
+          return p && p.reviewDue && p.reviewDue <= now;
+        });
+        if (!dueQs.length) {
+          alert('目前所選範圍沒有到期的遺忘曲線題目！已為你挑選新題與鞏固練習。');
+          pool = shuffle(pool);
+        } else {
+          pool = shuffle(dueQs);
+        }
+        if (count) pool = pool.slice(0, count);
+      } else {
+        // 完全隨機
+        pool = shuffle(pool);
+        if (count) pool = pool.slice(0, count);
+      }
 
-        pool = shuffle(finalPool);
-      } else {
-        // 全卷模式：錯題 ➔ 新題 ➔ 鞏固題 ➔ 已掌握
-        pool = [
-          ...shuffle(availableWrong),
-          ...shuffle(newQuestions),
-          ...shuffle(availableReview),
-          ...shuffle(mastered)
-        ];
-      }
-    } else if (mode === 'new') {
-      // 只練新題
-      const newQs = pool.filter(q => !store.q[q.id] || (store.q[q.id].attempts || 0) === 0);
-      if (!newQs.length) {
-        alert('恭喜！所選範圍的所有題目你都已經至少做過一次！已為你切換為複習練習。');
-        pool = shuffle(pool);
-      } else {
-        pool = shuffle(newQs);
-      }
-      if (count) pool = pool.slice(0, count);
-    } else if (mode === 'wrong') {
-      // 只練當前錯題
-      const wrongQs = pool.filter(q => {
-        const p = store.q[q.id];
-        return p && p.box < 3 && (p.wrong || 0) > 0;
-      });
-      if (!wrongQs.length) {
-        alert('所選範圍目前沒有待複習的錯題！已自動為你挑選新題目。');
-        pool = shuffle(pool);
-      } else {
-        pool = shuffle(wrongQs);
-      }
-      if (count) pool = pool.slice(0, count);
-    } else if (mode === 'ebbinghaus') {
-      // 遺忘曲線到期題
-      const dueQs = pool.filter(q => {
-        const p = store.q[q.id];
-        return p && p.reviewDue && p.reviewDue <= now;
-      });
-      if (!dueQs.length) {
-        alert('目前所選範圍沒有到期的遺忘曲線題目！已為你挑選新題與鞏固練習。');
-        pool = shuffle(pool);
-      } else {
-        pool = shuffle(dueQs);
-      }
-      if (count) pool = pool.slice(0, count);
-    } else {
-      // 完全隨機
-      pool = shuffle(pool);
-      if (count) pool = pool.slice(0, count);
-    }
+      runPractice(pool, { restart: startPracticeSession, count, mode });
+    };
 
-    runPractice(pool);
+    startPracticeSession();
   };
   $('#pr-images').onclick = () => runPractice(shuffle(DATA.questions.filter((q) => q.image)));
   $('#challenge').onclick = () => { store.challengeDone = today(); save(); runPractice(dailyChallenge()); };
@@ -1261,13 +1275,25 @@ function runPractice(pool, opts = {}) {
       <section class="card">
         <h2>練習完成</h2>
         <p class="score">${pct}％</p>
-        <p>這組 ${total} 題,答對 ${right}、答錯 ${wrong}</p>
+        <p>這組 ${total} 題，答對 ${right}、答錯 ${wrong}</p>
         ${weakDiagnosticHtml}
-        ${sessionWrong.length ? '<button class="primary" id="redo-wrong">只練這次錯的</button>' : '<p class="muted">這組全對,讚!</p>'}
-        <button id="again">再練一次</button>
-        <button id="back">回首頁</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+          ${sessionWrong.length ? `<button class="primary" id="redo-wrong">只練這次錯的 (${sessionWrong.length} 題)</button>` : '<p class="muted" style="margin:0">這組全對，太棒了！</p>'}
+          <button class="primary" id="next-round" style="background:#2563eb;color:#fff;font-weight:600">換下一組新題（不重複）</button>
+          <button id="again" style="background:#f8fafc;border:1px solid #cbd5e1;color:#64748b;font-size:13px">重練本組題目</button>
+          <button id="back">回首頁</button>
+        </div>
       </section>`;
-    if (sessionWrong.length) $('#redo-wrong').onclick = () => runPractice(sessionWrong.slice());
+    if (sessionWrong.length) $('#redo-wrong').onclick = () => runPractice(sessionWrong.slice(), opts);
+    if ($('#next-round')) {
+      $('#next-round').onclick = () => {
+        if (opts.restart) {
+          opts.restart();
+        } else {
+          home();
+        }
+      };
+    }
     view.querySelectorAll('.drill-scope-btn').forEach((btn) => {
       btn.onclick = () => {
         const sc = btn.dataset.scope;
@@ -1275,7 +1301,7 @@ function runPractice(pool, opts = {}) {
         runPractice(shuffle(scopePool));
       };
     });
-    $('#again').onclick = () => runPractice(shuffle(pool.slice()));
+    $('#again').onclick = () => runPractice(shuffle(pool.slice()), opts);
     $('#back').onclick = home;
   };
   render();
