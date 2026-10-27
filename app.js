@@ -685,9 +685,11 @@ function home() {
       </label>
       <label>出題方式
         <select id="pr-mode">
-          <option value="smart">智慧複習（優先錯題與沒做過的）</option>
+          <option value="smart">智慧排程（沒做過的新題與錯題優先）</option>
+          <option value="new">只練沒做過的新題（完全排除已做過）</option>
+          <option value="wrong">只練待複習錯題（錯題特訓）</option>
           <option value="ebbinghaus">遺忘曲線複習（只練已排程且到期的題目）</option>
-          <option value="random">隨機</option>
+          <option value="random">完全隨機</option>
         </select>
       </label>
       <label>題數
@@ -717,13 +719,7 @@ function home() {
   const pickPool = () => {
     const keys = selectedKeys();
     const src = $('#pr-source') ? $('#pr-source').value : '';
-    const mode = $('#pr-mode') ? $('#pr-mode').value : 'smart';
-    const now = Date.now();
     return DATA.questions.filter((q) => {
-      if (mode === 'ebbinghaus') {
-        const p = store.q[q.id];
-        if (!p || !p.reviewDue || p.reviewDue > now) return false;
-      }
       return (activeLevel === '全部' || q.level === activeLevel) &&
         keys.has(rangeKey(q)) &&
         matchKw(q) &&
@@ -733,9 +729,40 @@ function home() {
   const updateSum = () => {
     const pool = pickPool();
     const tag = activeLevel === '全部' ? '全部' : activeLevel;
-    const mode = $('#pr-mode') ? $('#pr-mode').value : '';
-    const modeDesc = mode === 'ebbinghaus' ? '［遺忘曲線到期題］' : '';
-    $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（${tag}${modeDesc}）`;
+    const mode = $('#pr-mode') ? $('#pr-mode').value : 'smart';
+    const now = Date.now();
+
+    let newCount = 0;
+    let wrongCount = 0;
+    let reviewCount = 0;
+    let masteredCount = 0;
+    let ebbinghausCount = 0;
+
+    for (const q of pool) {
+      const p = store.q[q.id];
+      if (!p || (p.attempts || 0) === 0) {
+        newCount++;
+      } else {
+        if (p.reviewDue && p.reviewDue <= now) ebbinghausCount++;
+        if (isMastered(p.box)) {
+          masteredCount++;
+        } else if (p.box === 1 && (p.wrong || 0) > 0) {
+          wrongCount++;
+        } else {
+          reviewCount++;
+        }
+      }
+    }
+
+    if (mode === 'new') {
+      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中未做過新題共 ${newCount} 題）`;
+    } else if (mode === 'wrong') {
+      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中待複習錯題共 ${wrongCount} 題）`;
+    } else if (mode === 'ebbinghaus') {
+      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中遺忘曲線到期題共 ${ebbinghausCount} 題）`;
+    } else {
+      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（${tag} · 未做過 ${newCount} · 錯題 ${wrongCount} · 鞏固中 ${reviewCount} · 已掌握 ${masteredCount}）`;
+    }
   };
   const setLevelTab = (lv) => {
     activeLevel = lv;
@@ -868,12 +895,14 @@ function home() {
 
           pool = shuffle(finalPool);
         } else {
-          // 全卷模式：未冷卻錯題 ➔ 新題 ➔ 未冷卻鞏固題 ➔ 已掌握 ➔ 冷卻題
+          // 全卷模式（count === 0）：保證全部題目皆納入（總數不因冷卻期浮動少題）
+          // 出題優先序：從沒做過的新題 ➔ 待複習錯題 ➔ 鞏固中題目 ➔ 已掌握題目 ➔ 剛做過之冷卻題
           pool = [
-            ...shuffle(availableWrong),
             ...shuffle(newQuestions),
-            ...shuffle(availableReview),
-            ...shuffle(mastered)
+            ...shuffle(activeWrong),
+            ...shuffle(reviewing),
+            ...shuffle(mastered),
+            ...shuffle(coolingDown)
           ];
         }
       } else if (mode === 'new') {
