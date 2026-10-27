@@ -21,6 +21,103 @@ export function isMastered(box) {
   return (box || 1) >= MASTER_BOX;
 }
 
+// ---- 練習出題 ----
+export const PRACTICE_COOLDOWN_MS = 20 * 60 * 1000; // 剛做過的題目 20 分鐘內不優先再出
+
+// 出題分類。首頁摘要與各出題模式共用同一個定義,摘要寫幾題、實際就出幾題。
+export function practiceCategory(p) {
+  if (!p || (p.attempts || 0) === 0) return 'new';
+  if (isMastered(p.box)) return 'mastered';
+  if (p.box === 1 && (p.wrong || 0) > 0) return 'wrong';
+  return 'reviewing';
+}
+
+export function isReviewDue(p, now) {
+  return !!(p && p.reviewDue && p.reviewDue <= now);
+}
+
+function isCooling(p, now) {
+  return !!(p && p.lastAnsweredAt && now - p.lastAnsweredAt < PRACTICE_COOLDOWN_MS);
+}
+
+export function practiceSummary(pool, progress, now) {
+  const s = { total: pool.length, new: 0, wrong: 0, reviewing: 0, mastered: 0, due: 0 };
+  for (const q of pool) {
+    const p = progress[q.id];
+    s[practiceCategory(p)]++;
+    if (isReviewDue(p, now)) s.due++;
+  }
+  return s;
+}
+
+function shuffleWith(arr, random) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// 依模式排出練習佇列。count=0 為全卷。
+// 回傳 { queue, empty }:empty 有值('new'/'wrong'/'due')代表該模式選不到題,呼叫端應提示並停下,不要改出別的題。
+// smart:新題與錯題優先;冷卻中的題只在沒有新題時才放行。全卷不剔除冷卻題,只排到最後(題數才不會隨時間浮動)。
+export function buildPracticeQueue(pool, progress, { mode = 'smart', count = 0, now = Date.now(), random = Math.random } = {}) {
+  const shuffle = (a) => shuffleWith(a, random);
+  const take = (a) => (count ? a.slice(0, count) : a);
+  const prog = (q) => progress[q.id];
+
+  if (mode === 'new' || mode === 'wrong' || mode === 'ebbinghaus') {
+    const keep = mode === 'new' ? (q) => practiceCategory(prog(q)) === 'new'
+      : mode === 'wrong' ? (q) => practiceCategory(prog(q)) === 'wrong'
+      : (q) => isReviewDue(prog(q), now);
+    const picked = pool.filter(keep);
+    if (!picked.length) return { queue: [], empty: mode === 'ebbinghaus' ? 'due' : mode };
+    // 冷卻中的題排在後面,指定題數時先出沒剛做過的
+    const fresh = picked.filter((q) => !isCooling(prog(q), now));
+    const cooling = picked.filter((q) => isCooling(prog(q), now));
+    return { queue: take([...shuffle(fresh), ...shuffle(cooling)]), empty: null };
+  }
+
+  if (mode !== 'smart') return { queue: take(shuffle(pool)), empty: null };
+
+  const buckets = { new: [], wrong: [], reviewing: [], mastered: [], cooling: [] };
+  for (const q of pool) {
+    const p = prog(q);
+    const cat = practiceCategory(p);
+    buckets[cat !== 'new' && isCooling(p, now) ? 'cooling' : cat].push(q);
+  }
+
+  if (!count) {
+    return {
+      queue: [...shuffle(buckets.new), ...shuffle(buckets.wrong), ...shuffle(buckets.reviewing), ...shuffle(buckets.mastered), ...shuffle(buckets.cooling)],
+      empty: null,
+    };
+  }
+
+  // 還有新題時,冷卻題絕不提前放行;沒新題了才讓冷卻中的錯題/鞏固題回來
+  const noNew = buckets.new.length === 0;
+  const coolingOf = (cat) => (noNew ? buckets.cooling.filter((q) => practiceCategory(prog(q)) === cat) : []);
+  const wrong = buckets.wrong.length ? buckets.wrong : coolingOf('wrong');
+  const reviewing = buckets.reviewing.length ? buckets.reviewing : coolingOf('reviewing');
+
+  // 複習題最多約 35%,其餘出新題
+  const maxReview = wrong.length || reviewing.length ? Math.max(1, Math.round(count * 0.35)) : 0;
+  let picked = [...shuffle([...wrong, ...reviewing]).slice(0, maxReview)];
+  picked = picked.concat(shuffle(buckets.new).slice(0, count - picked.length));
+
+  // 不夠就先補沒在冷卻的題,真的不夠才動用冷卻題
+  const fill = (cands) => {
+    if (picked.length >= count) return;
+    const ids = new Set(picked.map((q) => q.id));
+    picked = picked.concat(shuffle(cands.filter((q) => !ids.has(q.id))).slice(0, count - picked.length));
+  };
+  fill(pool.filter((q) => !isCooling(prog(q), now)));
+  fill(pool);
+
+  return { queue: shuffle(picked), empty: null };
+}
+
 // 模擬考計分。questions 為出題順序,answers[i] 為該題選的選項 index(null=未作答)。
 export function scoreExam(questions, answers) {
   let correct = 0;

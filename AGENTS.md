@@ -172,9 +172,14 @@ python3 -m http.server 8000        # 本機開站(fetch 需要 http,不能 file:
 
 - **合併（`mergeStores`）**：筆記／星標／排程各比**自己的**時間戳（`noteUpdatedAt`／`starredUpdatedAt`／`reviewUpdatedAt`），不可退回 `updatedAt`——作答會更新 `updatedAt`，會靜默蓋掉另一端的筆記。`box`、`history`、`recent` 由合併後的 `logs` 重算，不要各取 max。
 - **練習計分**：同一題單次呈現只計分一次；星標／提示／加入複習會重繪，重繪只還原畫面（`runPractice` 的 `scored`）。
-- **練習排程與冷卻**：全卷模式（`count === 0`）不可過濾剔除 20 分鐘冷卻題，否則會因題目隨時間退冷卻造成「範圍相同但總題數在 193 與 194 間浮動」的短少問題；冷卻題必須擺在佇列最尾端。全卷模式保證「未做過的新題優先出題」，其後接續錯題、鞏固題、已掌握題與冷卻題。
+- **練習排程與冷卻**：出題一律走 `core.js` 的 `buildPracticeQueue`（有測試），不要在 `app.js` 另寫一套。全卷模式（`count === 0`）不可過濾剔除 20 分鐘冷卻題，否則會因題目隨時間退冷卻造成「範圍相同但總題數在 193 與 194 間浮動」的短少問題；冷卻題必須擺在佇列最尾端。全卷模式保證「未做過的新題優先出題」，其後接續錯題、鞏固題、已掌握題與冷卻題。
+- **出題分類只有一個定義**：首頁摘要與各模式都用 `practiceCategory`（錯題 = box 1 且答錯過）。曾經摘要用 box 1、「只練錯題」用 box < 3，摘要寫 5 題實際出 8 題。
+- **模式選不到題就停**：`buildPracticeQueue` 回傳 `empty` 時只提示、不開始練習；曾經改成全範圍隨機出題，連冷卻題都出。
+- **「換下一組新題」重抽**：要用按「開始練習」當下存的篩選條件（`readCriteria()` 的快照）。練習畫面已換掉首頁表單，重抽時去讀 DOM 會直接報錯（`$('#pr-kw')` 是 null）。
+- **每個改筆記／思路的地方都要記 `noteUpdatedAt` 與 `updatedAt`**：「筆記」頁曾漏記，跨裝置合併時新筆記被舊的蓋掉。
+- **`notionSyncedAt` 記開始同步的時間**：由 `app.js` 的 `syncQuestionToNotion` 包裝統一設定，呼叫端不要再寫 `Date.now()`；記完成時間會讓同步期間改的筆記被標成「已在 Notion」。按鈕文字用 `notionBtnLabel(p)`。
 - **複習排程**：只推進「考生已加入複習」的題目，不在作答時自動建立（否則取消會被復活）；首次排程 1 天。
 - **模考計時**：以實際經過時間扣減、分頁隱藏時暫停，不可用回呼次數。
 - **Notion**：404 先確認資料庫可存取才重建頁面；`notionBlockIds` 未知時留 `undefined`（不是 `[]`）；舊頁面只刪有固定標記的系統區塊。批次同步必須回報失敗項目。
-- 改以上任一項，對應測試在 `core.test.mjs`「本輪審查補強」與 `notion_sync.test.mjs` 案例 12–15。
+- 改以上任一項，對應測試在 `core.test.mjs`「本輪審查補強」「練習出題(buildPracticeQueue)」與 `notion_sync.test.mjs` 案例 12–15。
 - **語法檢查**：`node --check app.js` 不會把 `.js` 當 ES module 解析，曾放過一段殘留的重複程式碼（整站白屏）。`core.test.mjs` 已內建 module 語法硬檢查；手動檢查請先複製成 `.mjs`。

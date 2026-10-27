@@ -1,4 +1,4 @@
-import { nextBox, isMastered, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
+import { nextBox, isMastered, practiceSummary, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -491,14 +491,23 @@ function notionBatchMsg(ok, total, failed) {
   return `⚠ 成功 ${ok} 題、失敗 ${failed.length} 題：${first}${failed.length > 3 ? '…' : ''}。失敗的題目尚未標記為已同步，請稍後再按一次重試（已成功的不會重複新增）。`;
 }
 
+// 成功後 notionSyncedAt 記「開始同步」的時間,不是完成時間:同步要等網路,期間改的筆記沒送上去,
+// 記完成時間會讓按鈕誤顯示「已在 Notion」。呼叫端不要再自己覆寫 notionSyncedAt。
 async function syncQuestionToNotion(q, p = {}) {
   const { dbId } = getNotionConfig();
-  return coreSyncQuestionToNotion(q, p, {
+  const startedAt = Date.now();
+  const res = await coreSyncQuestionToNotion(q, p, {
     dbId,
     callNotion,
     fetchDbSchema,
   });
+  p.notionSyncedAt = startedAt;
+  p.updatedAt = Math.max(p.updatedAt || 0, Date.now());
+  return res;
 }
+const notionBtnLabel = (p) => (p.notionSyncedAt
+  ? ((p.noteUpdatedAt || 0) > p.notionSyncedAt ? '🔄 更新至 Notion' : '✓ 已在 Notion')
+  : '📌 存入 Notion');
 
 // ---- views ----
 function setNav(active) {
@@ -709,59 +718,32 @@ function home() {
     </section>`;
 
   let activeLevel = currLv;
-  const selectedKeys = () => new Set([...view.querySelectorAll('.rng:checked')].map((c) => c.value));
-  const kw = () => $('#pr-kw').value.trim().toLowerCase();
-  const matchKw = (q) => {
-    const k = kw();
-    if (!k) return true;
-    return `${q.question}${q.topic || ''}${q.chapter || ''}${q.options.join(' ')}`.toLowerCase().includes(k);
-  };
-  const pickPool = () => {
-    const keys = selectedKeys();
-    const src = $('#pr-source') ? $('#pr-source').value : '';
-    return DATA.questions.filter((q) => {
-      return (activeLevel === '全部' || q.level === activeLevel) &&
-        keys.has(rangeKey(q)) &&
-        matchKw(q) &&
-        (!src || srcOf(q) === src);
-    });
-  };
+  // 篩選條件讀成固定值:練習畫面會換掉首頁表單,「換下一組新題」重抽時要用開始當下存的條件,不能再讀 DOM
+  const readCriteria = () => ({
+    level: activeLevel,
+    keys: new Set([...view.querySelectorAll('.rng:checked')].map((c) => c.value)),
+    kw: $('#pr-kw').value.trim().toLowerCase(),
+    src: $('#pr-source') ? $('#pr-source').value : '',
+  });
+  const filterPool = (c) => DATA.questions.filter((q) =>
+    (c.level === '全部' || q.level === c.level) &&
+    c.keys.has(rangeKey(q)) &&
+    (!c.kw || `${q.question}${q.topic || ''}${q.chapter || ''}${q.options.join(' ')}`.toLowerCase().includes(c.kw)) &&
+    (!c.src || srcOf(q) === c.src));
   const updateSum = () => {
-    const pool = pickPool();
+    const pool = filterPool(readCriteria());
     const tag = activeLevel === '全部' ? '全部' : activeLevel;
     const mode = $('#pr-mode') ? $('#pr-mode').value : 'smart';
-    const now = Date.now();
-
-    let newCount = 0;
-    let wrongCount = 0;
-    let reviewCount = 0;
-    let masteredCount = 0;
-    let ebbinghausCount = 0;
-
-    for (const q of pool) {
-      const p = store.q[q.id];
-      if (!p || (p.attempts || 0) === 0) {
-        newCount++;
-      } else {
-        if (p.reviewDue && p.reviewDue <= now) ebbinghausCount++;
-        if (isMastered(p.box)) {
-          masteredCount++;
-        } else if (p.box === 1 && (p.wrong || 0) > 0) {
-          wrongCount++;
-        } else {
-          reviewCount++;
-        }
-      }
-    }
+    const s = practiceSummary(pool, store.q, Date.now());
 
     if (mode === 'new') {
-      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中未做過新題共 ${newCount} 題）`;
+      $('#range-sum').textContent = `已選範圍共 ${s.total} 題（其中未做過新題共 ${s.new} 題）`;
     } else if (mode === 'wrong') {
-      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中待複習錯題共 ${wrongCount} 題）`;
+      $('#range-sum').textContent = `已選範圍共 ${s.total} 題（其中待複習錯題共 ${s.wrong} 題）`;
     } else if (mode === 'ebbinghaus') {
-      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（其中遺忘曲線到期題共 ${ebbinghausCount} 題）`;
+      $('#range-sum').textContent = `已選範圍共 ${s.total} 題（其中遺忘曲線到期題共 ${s.due} 題）`;
     } else {
-      $('#range-sum').textContent = `已選範圍共 ${pool.length} 題（${tag} · 未做過 ${newCount} · 錯題 ${wrongCount} · 鞏固中 ${reviewCount} · 已掌握 ${masteredCount}）`;
+      $('#range-sum').textContent = `已選範圍共 ${s.total} 題（${tag} · 未做過 ${s.new} · 錯題 ${s.wrong} · 鞏固中 ${s.reviewing} · 已掌握 ${s.mastered}）`;
     }
   };
   const setLevelTab = (lv) => {
@@ -826,128 +808,25 @@ function home() {
   $('#pr-start').onclick = () => {
     const count = +$('#pr-count').value;
     const mode = $('#pr-mode').value;
+    const criteria = readCriteria();
+    const emptyMsg = {
+      new: '所選範圍的題目你都已經做過至少一次了,可以改用「智慧排程」或「待複習錯題」。',
+      wrong: '所選範圍目前沒有待複習的錯題。',
+      due: '所選範圍目前沒有到期的遺忘曲線題目。',
+    };
 
     const startPracticeSession = () => {
-      let pool = pickPool();
+      const pool = filterPool(criteria);
       if (!pool.length) {
         alert('所選範圍目前沒有符合條件的題目！');
         return;
       }
-
-      const now = Date.now();
-      const COOLDOWN_MS = 20 * 60 * 1000; // 20 分鐘冷卻期（剛做完的題目在冷卻期間絕不出現在下一輪練習）
-
-      if (mode === 'smart') {
-        // 智慧排程：徹底解決「總感覺一直重複練一樣題目」
-        const activeWrong = []; // Box 1 且未在冷卻中的錯題
-        const newQuestions = []; // 從沒做過的新題
-        const reviewing = []; // Box 2 進入鞏固期且未在冷卻中的題目
-        const mastered = []; // Box 3 已掌握的題目
-        const coolingDown = []; // 剛在 20 分鐘內做過、冷卻中的題目
-
-        for (const q of pool) {
-          const p = store.q[q.id];
-          if (!p || (p.attempts || 0) === 0) {
-            newQuestions.push(q);
-          } else if (p.lastAnsweredAt && now - p.lastAnsweredAt < COOLDOWN_MS) {
-            coolingDown.push(q);
-          } else if (isMastered(p.box)) {
-            mastered.push(q);
-          } else if (p.box === 1 && p.wrong > 0) {
-            activeWrong.push(q);
-          } else {
-            reviewing.push(q);
-          }
-        }
-
-        // 嚴格冷卻保護：只要還有新題目，冷卻中的題目絕不提前釋放！只有在題目池已無任何新題時才放寬
-        const availableWrong = activeWrong.length
-          ? activeWrong
-          : (newQuestions.length === 0 ? coolingDown.filter(q => (store.q[q.id]?.box === 1 && store.q[q.id]?.wrong > 0)) : []);
-        const availableReview = reviewing.length
-          ? reviewing
-          : (newQuestions.length === 0 ? coolingDown.filter(q => (store.q[q.id]?.box === 2)) : []);
-
-        if (count > 0) {
-          // 若有可用的複習題，最多佔 30%~40%，其餘全部出新題目
-          const maxReviewCount = (availableWrong.length || availableReview.length)
-            ? Math.max(1, Math.round(count * 0.35))
-            : 0;
-
-          const reviewPicks = shuffle([...availableWrong, ...availableReview]).slice(0, maxReviewCount);
-          const newPicks = shuffle(newQuestions).slice(0, count - reviewPicks.length);
-
-          let finalPool = [...reviewPicks, ...newPicks];
-
-          // 若新題與複習題不足指定題數，優先從「不在冷卻中的已掌握題」補齊，避免重複剛做過的題目
-          if (finalPool.length < count) {
-            const pickedIds = new Set(finalPool.map(q => q.id));
-            const notCoolingRemaining = shuffle(pool.filter(q => !pickedIds.has(q.id) && (!store.q[q.id]?.lastAnsweredAt || now - store.q[q.id].lastAnsweredAt >= COOLDOWN_MS)));
-            finalPool = finalPool.concat(notCoolingRemaining.slice(0, count - finalPool.length));
-          }
-
-          // 真的全池都練完且全都在 20 分鐘冷卻中時，才以剩餘題目補滿
-          if (finalPool.length < count) {
-            const pickedIds = new Set(finalPool.map(q => q.id));
-            const remainingPool = shuffle(pool.filter(q => !pickedIds.has(q.id)));
-            finalPool = finalPool.concat(remainingPool.slice(0, count - finalPool.length));
-          }
-
-          pool = shuffle(finalPool);
-        } else {
-          // 全卷模式（count === 0）：保證全部題目皆納入（總數不因冷卻期浮動少題）
-          // 出題優先序：從沒做過的新題 ➔ 待複習錯題 ➔ 鞏固中題目 ➔ 已掌握題目 ➔ 剛做過之冷卻題
-          pool = [
-            ...shuffle(newQuestions),
-            ...shuffle(activeWrong),
-            ...shuffle(reviewing),
-            ...shuffle(mastered),
-            ...shuffle(coolingDown)
-          ];
-        }
-      } else if (mode === 'new') {
-        // 只練新題
-        const newQs = pool.filter(q => !store.q[q.id] || (store.q[q.id].attempts || 0) === 0);
-        if (!newQs.length) {
-          alert('恭喜！所選範圍的所有題目你都已經至少做過一次！已為你切換為複習練習。');
-          pool = shuffle(pool);
-        } else {
-          pool = shuffle(newQs);
-        }
-        if (count) pool = pool.slice(0, count);
-      } else if (mode === 'wrong') {
-        // 只練當前錯題
-        const wrongQs = pool.filter(q => {
-          const p = store.q[q.id];
-          return p && p.box < 3 && (p.wrong || 0) > 0;
-        });
-        if (!wrongQs.length) {
-          alert('所選範圍目前沒有待複習的錯題！已自動為你挑選新題目。');
-          pool = shuffle(pool);
-        } else {
-          pool = shuffle(wrongQs);
-        }
-        if (count) pool = pool.slice(0, count);
-      } else if (mode === 'ebbinghaus') {
-        // 遺忘曲線到期題
-        const dueQs = pool.filter(q => {
-          const p = store.q[q.id];
-          return p && p.reviewDue && p.reviewDue <= now;
-        });
-        if (!dueQs.length) {
-          alert('目前所選範圍沒有到期的遺忘曲線題目！已為你挑選新題與鞏固練習。');
-          pool = shuffle(pool);
-        } else {
-          pool = shuffle(dueQs);
-        }
-        if (count) pool = pool.slice(0, count);
-      } else {
-        // 完全隨機
-        pool = shuffle(pool);
-        if (count) pool = pool.slice(0, count);
+      const { queue, empty } = buildPracticeQueue(pool, store.q, { mode, count, now: Date.now() });
+      if (empty) {
+        alert(emptyMsg[empty]);
+        return;
       }
-
-      runPractice(pool, { restart: startPracticeSession, count, mode });
+      runPractice(queue, { restart: startPracticeSession, count, mode });
     };
 
     startPracticeSession();
@@ -1134,11 +1013,7 @@ function runPractice(pool, opts = {}) {
       </div>
 
       <div class="notion-row">
-        <button class="notion-btn" id="notion-sync-btn">${
-          p.notionSyncedAt
-            ? ((p.noteUpdatedAt || 0) > p.notionSyncedAt ? '🔄 更新至 Notion' : '✓ 已在 Notion')
-            : '📌 存入 Notion'
-        }</button>
+        <button class="notion-btn" id="notion-sync-btn">${notionBtnLabel(p)}</button>
         <button class="notion-btn alt" id="notion-copy-btn">📋 複製 Notion 摺疊格式</button>
         <span id="notion-single-msg" class="muted" style="font-size:12px"></span>
       </div>
@@ -1221,16 +1096,13 @@ function runPractice(pool, opts = {}) {
       btn.textContent = '同步中…';
       try {
         await syncQuestionToNotion(q, p);
-        const now = Date.now();
-        p.notionSyncedAt = now;
-        p.updatedAt = now;
         save();
         btn.disabled = false;
-        btn.textContent = '✓ 已在 Notion';
+        btn.textContent = notionBtnLabel(p);
         msg.textContent = '已成功寫入 Notion 資料庫（含題目、選項、正解與詳解）！';
       } catch (err) {
         btn.disabled = false;
-        btn.textContent = p.notionSyncedAt ? '🔄 更新至 Notion' : '📌 存入 Notion';
+        btn.textContent = notionBtnLabel(p);
         msg.textContent = `失敗：${err.message}（可再按一次重試）`;
         save();
       }
@@ -1932,7 +1804,6 @@ function wrongbook() {
           msg.textContent = `同步中 (${idx + 1}/${filtered.length})…`;
           try {
             await syncQuestionToNotion(filtered[idx], qp(filtered[idx].id));
-            qp(filtered[idx].id).notionSyncedAt = Date.now();
             count++;
           } catch (e) { console.warn(e); failed.push({ id: filtered[idx].id, reason: e.message }); }
           save(); // 每題結束就落地(含新建的頁面 ID),避免中途失敗後重試又新增頁面
@@ -1980,11 +1851,7 @@ function notes() {
         return `<div class="note-item">
           <div class="row"><span class="muted">${p.starred ? '⭐ ' : ''}${esc(q.subject)}</span>
             <span>
-              <button class="notion-btn" style="padding:4px 9px!important;font-size:12px!important" data-id="${esc(q.id)}">${
-                p.notionSyncedAt
-                  ? ((p.noteUpdatedAt || 0) > p.notionSyncedAt ? '🔄 更新至 Notion' : '✓ 已在 Notion')
-                  : '📌 存入 Notion'
-              }</button>
+              <button class="notion-btn" style="padding:4px 9px!important;font-size:12px!important" data-id="${esc(q.id)}">${notionBtnLabel(p)}</button>
               <button class="goto" data-id="${esc(q.id)}">前往該題</button>
             </span>
           </div>
@@ -1993,7 +1860,16 @@ function notes() {
         </div>`;
       }).join('')}
     </section>`;
-  view.querySelectorAll('.note-edit').forEach((t) => (t.oninput = (e) => { qp(e.target.dataset.id).note = e.target.value; save(); }));
+  view.querySelectorAll('.note-edit').forEach((t) => (t.oninput = (e) => {
+    const p = qp(e.target.dataset.id);
+    const now = Date.now();
+    p.note = e.target.value;
+    p.noteUpdatedAt = now; // 合併以 noteUpdatedAt 判新舊,漏記會被另一台裝置的舊筆記蓋掉
+    p.updatedAt = now;
+    save();
+    const btn = e.target.closest('.note-item')?.querySelector('.notion-btn');
+    if (btn && !btn.disabled) btn.textContent = notionBtnLabel(p);
+  }));
   view.querySelectorAll('.goto').forEach((b) => (b.onclick = () => { const q = DATA.questions.find((x) => x.id === b.dataset.id); if (q) runPractice([q]); }));
   view.querySelectorAll('.note-item .notion-btn').forEach((b) => (b.onclick = async () => {
     const q = DATA.questions.find((x) => x.id === b.dataset.id);
@@ -2003,10 +1879,10 @@ function notes() {
     b.disabled = true; b.textContent = '同步中…';
     try {
       await syncQuestionToNotion(q, qp(q.id));
-      qp(q.id).notionSyncedAt = Date.now(); save();
-      b.textContent = '✓ 已存入';
+      save();
+      b.disabled = false; b.textContent = notionBtnLabel(qp(q.id));
     } catch (err) {
-      b.disabled = false; b.textContent = '📌 存入 Notion';
+      b.disabled = false; b.textContent = notionBtnLabel(qp(q.id));
       alert('同步失敗：' + err.message);
     }
   }));
@@ -2025,7 +1901,6 @@ function notes() {
         msg.textContent = `正在同步至 Notion (${idx + 1}/${items.length})…`;
         try {
           await syncQuestionToNotion(items[idx], qp(items[idx].id));
-          qp(items[idx].id).notionSyncedAt = Date.now();
           okCount++;
         } catch (err) {
           console.warn('Sync item failed:', err);
@@ -2401,7 +2276,6 @@ function settings() {
       msg.textContent = `正在同步 (${idx + 1}/${targetQs.length})…`;
       try {
         await syncQuestionToNotion(targetQs[idx], qp(targetQs[idx].id));
-        qp(targetQs[idx].id).notionSyncedAt = Date.now();
         ok++;
       } catch (e) { console.warn(e); failed.push({ id: targetQs[idx].id, reason: e.message }); }
       save();

@@ -497,6 +497,55 @@ assert.equal(mergedWithReset2.streak.count, 0);
 }
 
 console.log('PASS (含 mergeStores 統計自洽快照、舊版遷移與重設全隔離測試)');
+// ---- 練習出題(buildPracticeQueue):全卷不少題、冷卻排最後、選不到題不改出別的 ----
+import { buildPracticeQueue, practiceSummary, practiceCategory, PRACTICE_COOLDOWN_MS } from './core.js';
+{
+  const NOW = 10_000_000_000;
+  const qs = Array.from({ length: 12 }, (_, i) => ({ id: 'p' + i }));
+  const prog = {
+    p0: { attempts: 1, box: 1, wrong: 1, lastAnsweredAt: NOW - 60_000 },            // 錯題,冷卻中
+    p1: { attempts: 1, box: 1, wrong: 1, lastAnsweredAt: NOW - PRACTICE_COOLDOWN_MS - 1 }, // 錯題
+    p2: { attempts: 2, box: 2, wrong: 1, lastAnsweredAt: NOW - 60_000 },            // 鞏固,冷卻中(答錯過但不是當前錯題)
+    p3: { attempts: 2, box: 3, wrong: 0, lastAnsweredAt: 1 },                       // 已掌握
+    p4: { attempts: 1, box: 2, wrong: 0, lastAnsweredAt: 1, reviewDue: NOW - 1 },   // 鞏固,到期
+  }; // p5..p11 沒做過
+  const rnd = () => 0.42;
+  const ids = (r) => r.queue.map((q) => q.id);
+
+  // 全卷:一題都不能少,新題在最前、冷卻題在最後
+  const full = buildPracticeQueue(qs, prog, { mode: 'smart', count: 0, now: NOW, random: rnd });
+  assert.equal(full.queue.length, 12, '全卷模式不可剔除冷卻題');
+  assert.deepEqual(new Set(ids(full).slice(0, 7)), new Set(['p5', 'p6', 'p7', 'p8', 'p9', 'p10', 'p11']), '全卷新題優先');
+  assert.deepEqual(new Set(ids(full).slice(-2)), new Set(['p0', 'p2']), '冷卻題排最後');
+
+  // 指定題數且還有新題:冷卻題不可出現
+  for (let t = 0; t < 20; t++) {
+    const r = buildPracticeQueue(qs, prog, { mode: 'smart', count: 8, now: NOW });
+    assert.equal(r.queue.length, 8);
+    assert.ok(!ids(r).includes('p0') && !ids(r).includes('p2'), '還有新題時冷卻題不得提前放行');
+  }
+
+  // 摘要與「只練錯題」用同一個定義(p2 答錯過但在 box 2,不算待複習錯題)
+  const s = practiceSummary(qs, prog, NOW);
+  assert.deepEqual([s.new, s.wrong, s.reviewing, s.mastered, s.due], [7, 2, 2, 1, 1]);
+  const wrongR = buildPracticeQueue(qs, prog, { mode: 'wrong', now: NOW, random: rnd });
+  assert.equal(wrongR.queue.length, s.wrong, '摘要錯題數要等於實際出題數');
+  assert.deepEqual(ids(wrongR), ['p1', 'p0'], '冷卻中的錯題排在後面');
+  assert.equal(practiceCategory(prog.p2), 'reviewing');
+
+  // 選不到題:回報 empty、不出別的題
+  const allDone = { p0: { attempts: 1, box: 2, wrong: 0 } };
+  const noNew = buildPracticeQueue([{ id: 'p0' }], allDone, { mode: 'new', now: NOW });
+  assert.deepEqual([noNew.queue.length, noNew.empty], [0, 'new']);
+  assert.equal(buildPracticeQueue(qs, {}, { mode: 'wrong', now: NOW }).empty, 'wrong');
+  assert.equal(buildPracticeQueue(qs, {}, { mode: 'ebbinghaus', now: NOW }).empty, 'due');
+  assert.deepEqual(ids(buildPracticeQueue(qs, prog, { mode: 'ebbinghaus', now: NOW })), ['p4']);
+
+  // 沒新題了:冷卻題可以回來補滿
+  const old = Object.fromEntries(qs.map((q) => [q.id, { attempts: 1, box: 2, wrong: 0, lastAnsweredAt: NOW - 1 }]));
+  assert.equal(buildPracticeQueue(qs, old, { mode: 'smart', count: 10, now: NOW }).queue.length, 10);
+}
+console.log('PASS (含 buildPracticeQueue 全卷不少題、冷卻、模式選不到題)');
 
 // ---- 語法硬檢查:app.js / core.js 必須能以 ES module 解析 ----
 // 歷史教訓:app.js 曾殘留一段重複的舊程式碼導致整站白屏,但 `node --check app.js` 照樣通過(不會當 module 解析)。
