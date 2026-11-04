@@ -6,7 +6,8 @@ const CODE_RE = /^[a-z]+-[a-z]+-\d{2,4}$/i;
 const MAX_BYTES = 1024 * 1024; // 作答事件 logs 會隨使用累積,256KB 不夠;D1 單列上限 2MB
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
+  // PATCH 不可少:Notion 更新頁面屬性與追加區塊都是 PATCH,漏掉會讓瀏覽器預檢失敗,前端只看到「Failed to fetch」
+  'Access-Control-Allow-Methods': 'GET,PUT,POST,PATCH,DELETE,OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type,Authorization,Notion-Version',
 };
 const json = (obj, status = 200) =>
@@ -43,10 +44,13 @@ export default {
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     // workers.dev 沒有自己的 zone,掛不了 dashboard 的 Rate Limiting Rule,改用原生 Workers Rate Limiting binding:
     // 只在 Worker 內比對 IP 出手次數,不落地存 IP。
-    if (env.RATE_LIMITER) {
+    // Notion 轉送另用較寬的桶(NOTION_LIMITER):批次同步一題要 3~4 個請求,86 題遠超同步碼用的 60 次/分。
+    // 同步碼的桶是為了擋猜碼;Notion 請求必須帶使用者自己的 Token,且 Notion 端另有速率限制。
+    const limiter = new URL(req.url).pathname.startsWith('/notion/') ? env.NOTION_LIMITER : env.RATE_LIMITER;
+    if (limiter) {
       const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
-      const rl = await env.RATE_LIMITER.limit({ key: ip });
-      if (!rl.success) return json({ error: 'rate_limited' }, 429);
+      const rl = await limiter.limit({ key: ip });
+      if (!rl.success) return new Response(JSON.stringify({ error: 'rate_limited' }), { status: 429, headers: { ...CORS, 'Content-Type': 'application/json', 'Retry-After': '10' } });
     }
     const url = new URL(req.url);
 

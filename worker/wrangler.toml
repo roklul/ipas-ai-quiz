@@ -22,6 +22,12 @@ name = "RATE_LIMITER"
 namespace_id = "1001"
 simple = { limit = 60, period = 60 }
 
+# Notion 轉送(/notion/*)專用:批次同步一次會送數百個請求,與同步碼共用 60 次/分會整批被擋。
+[[ratelimits]]
+name = "NOTION_LIMITER"
+namespace_id = "1002"
+simple = { limit = 600, period = 60 }
+
 [vars]
 VAPID_PUBLIC = "BD2nacY5fbE8m29_YRwqMo0jUyWDVgi2ELGEaXTPpxElqgbwLOBGgwQDHyPRcxIEBdd9htl7nKoFSCGzLaozwkw" # 自己產生:npx web-push generate-vapid-keys
 ADMIN_CONTACT = "mailto:roklul@gmail.com" # 改成你的聯絡信箱

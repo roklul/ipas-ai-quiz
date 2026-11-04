@@ -566,3 +566,21 @@ import { join } from 'node:path';
 
 // 引入 Notion 正文原子更新、錯誤傳遞與狀態防護測試
 import './notion_sync.test.mjs';
+
+// ---- CORS 硬檢查:core.js 呼叫 Notion 用到的每種 HTTP 方法,Worker 與本機 server 都要放行 ----
+// 歷史教訓:Worker 漏放 PATCH,GitHub Pages 跨網域同步 Notion 時預檢被擋,86 題全部只顯示「Failed to fetch」;
+// 本機 localhost 同源不需預檢,所以在本機測不出來。
+{
+  const { readFileSync } = await import('node:fs');
+  const src = (f) => readFileSync(new URL('./' + f, import.meta.url), 'utf8');
+  const used = new Set([...src('core.js').matchAll(/method:\s*'([A-Z]+)'/g)].map((m) => m[1]));
+  const allowOf = (text, re) => (text.match(re) || [, ''])[1].toUpperCase();
+  const workerAllow = allowOf(src('worker/src/index.js'), /'Access-Control-Allow-Methods':\s*'([^']+)'/);
+  const serverAllow = allowOf(src('server.mjs'), /'Access-Control-Allow-Methods',\s*'([^']+)'/);
+  assert.ok(used.size > 0, 'CORS 檢查:應從 core.js 抓到 Notion 呼叫方法');
+  for (const m of used) {
+    assert.ok(workerAllow.includes(m), `worker/src/index.js 的 CORS Allow-Methods 缺少 ${m}（Notion 跨網域會 Failed to fetch）`);
+    assert.ok(serverAllow.includes(m), `server.mjs 的 CORS Allow-Methods 缺少 ${m}`);
+  }
+  console.log('PASS (CORS Allow-Methods 涵蓋 Notion 呼叫方法: ' + [...used].join(',') + ')');
+}

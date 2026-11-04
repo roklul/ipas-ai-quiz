@@ -180,6 +180,7 @@ python3 -m http.server 8000        # 本機開站(fetch 需要 http,不能 file:
 - **`notionSyncedAt` 記開始同步的時間**：由 `app.js` 的 `syncQuestionToNotion` 包裝統一設定，呼叫端不要再寫 `Date.now()`；記完成時間會讓同步期間改的筆記被標成「已在 Notion」。按鈕文字用 `notionBtnLabel(p)`。
 - **複習排程**：只推進「考生已加入複習」的題目，不在作答時自動建立（否則取消會被復活）；首次排程 1 天。
 - **模考計時**：以實際經過時間扣減、分頁隱藏時暫停，不可用回呼次數。
+- **Notion 跨網域 CORS**：`worker/src/index.js` 與 `server.mjs` 的 `Access-Control-Allow-Methods` 必須涵蓋 `core.js` 呼叫 Notion 用到的每種方法（含 **PATCH**）。曾漏放 PATCH：GitHub Pages 跨網域預檢被擋，批次同步 86 題全部只顯示「Failed to fetch」；「連線測試」只用 GET 照樣成功，localhost 同源也測不出來。`core.test.mjs` 有硬檢查。改了 Worker 要另外 `cd worker && npx wrangler deploy`，GitHub push 不會部署 Worker。
 - **Notion**：404 先確認資料庫可存取才重建頁面；`notionBlockIds` 未知時留 `undefined`（不是 `[]`）；舊頁面只刪有固定標記的系統區塊。批次同步必須回報失敗項目。
 - 改以上任一項，對應測試在 `core.test.mjs`「本輪審查補強」「練習出題(buildPracticeQueue)」與 `notion_sync.test.mjs` 案例 12–15。
 - **語法檢查**：`node --check app.js` 不會把 `.js` 當 ES module 解析，曾放過一段殘留的重複程式碼（整站白屏）。`core.test.mjs` 已內建 module 語法硬檢查；手動檢查請先複製成 `.mjs`。
