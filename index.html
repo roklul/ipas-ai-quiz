@@ -95,6 +95,20 @@
   .range-item input { width:auto; }
   .range-item span { flex:1; font-size:14px; }
   .range-item b { color:var(--c-accent); font-variant-numeric:tabular-nums; }
+/* 細項進度明細:章節旁小字 + 依來源拆 */
+.rng-stat { display:flex; flex-wrap:wrap; gap:4px; margin-top:3px; font-size:12px; }
+.rng-stat i, .src-row i { font-style:normal; padding:0 6px; border-radius:999px; line-height:18px; font-variant-numeric:tabular-nums; }
+.st-new { background:#eff6ff; color:#1d4ed8; }
+.st-wrong { background:#fef2f2; color:#b91c1c; }
+.st-rev { background:#fffbeb; color:#b45309; }
+.st-ok { background:#f0fdf4; color:#15803d; }
+.st-none { color:var(--c-muted); }
+.src-sum { margin:0 0 10px; font-size:13px; }
+.src-title { color:var(--c-muted); font-weight:600; margin-bottom:4px; }
+.src-row { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:3px 0; }
+.src-row span { min-width:64px; }
+.src-row b { min-width:36px; color:var(--c-accent); font-variant-numeric:tabular-nums; }
+.src-row.dim { opacity:.45; }
   .qfig { max-width:100%; border:1px solid var(--c-line); border-radius:8px; margin:10px 0; display:block; }
   #installbar:not([hidden]) { display:flex; align-items:center; justify-content:space-between; gap:8px; max-width:720px; margin:0 auto; padding:10px 14px; background:#2563eb; color:#fff; font-size:14px; }
   #installbar button { border:0; border-radius:8px; padding:6px 12px; font-size:14px; cursor:pointer; margin-left:6px; }

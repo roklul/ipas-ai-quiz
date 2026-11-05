@@ -50,6 +50,20 @@ export function practiceSummary(pool, progress, now) {
   return s;
 }
 
+// 依 keyFn 分組做 practiceSummary(首頁「每個章節／每種來源」各自的進度明細用)。
+// 分類定義與 practiceSummary 相同,各組加總必等於整體。回傳 Map(key → summary),保留 order 給的順序。
+export function practiceSummaryBy(pool, progress, keyFn, now, order = []) {
+  const groups = new Map(order.map((k) => [k, []]));
+  for (const q of pool) {
+    const k = keyFn(q);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(q);
+  }
+  const out = new Map();
+  for (const [k, qs] of groups) out.set(k, practiceSummary(qs, progress, now));
+  return out;
+}
+
 function shuffleWith(arr, random) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {

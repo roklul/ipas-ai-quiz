@@ -533,6 +533,18 @@ import { buildPracticeQueue, practiceSummary, practiceCategory, PRACTICE_COOLDOW
   assert.deepEqual(ids(wrongR), ['p1', 'p0'], '冷卻中的錯題排在後面');
   assert.equal(practiceCategory(prog.p2), 'reviewing');
 
+  // 分組明細(首頁每章節／每來源):各組加總必須等於整體,且 order 中沒題的組也要出現(顯示 0)
+  {
+    const { practiceSummaryBy } = await import('./core.js');
+    const by = practiceSummaryBy(qs, prog, (q) => (+q.id.slice(1) % 2 ? '奇' : '偶'), NOW, ['偶', '奇', '空']);
+    assert.deepEqual([...by.keys()], ['偶', '奇', '空'], '保留 order 順序');
+    assert.equal(by.get('空').total, 0);
+    for (const f of ['total', 'new', 'wrong', 'reviewing', 'mastered', 'due']) {
+      assert.equal([...by.values()].reduce((a, x) => a + x[f], 0), s[f], `分組加總 ${f} 要等於整體`);
+    }
+    assert.deepEqual([by.get('偶').new, by.get('偶').wrong, by.get('偶').reviewing], [3, 1, 2]); // p0,p2,p4 + p6,p8,p10
+  }
+
   // 選不到題:回報 empty、不出別的題
   const allDone = { p0: { attempts: 1, box: 2, wrong: 0 } };
   const noNew = buildPracticeQueue([{ id: 'p0' }], allDone, { mode: 'new', now: NOW });

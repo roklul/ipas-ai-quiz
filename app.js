@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -538,7 +538,7 @@ function home() {
   groups.forEach((g) => (byLevel[g.level] ||= []).push(g));
   const ranges = Object.entries(byLevel).map(([lv, gs]) =>
     `<div class="range-group" data-level="${esc(lv)}"><div class="range-lv">${esc(lv)}</div>${gs.map((g) =>
-      `<label class="range-item"><input type="checkbox" class="rng" data-level="${esc(lv)}" value="${esc(g.key)}" checked><span>${esc(g.key)}</span><b>${g.count}</b></label>`).join('')}</div>`).join('');
+      `<label class="range-item"><input type="checkbox" class="rng" data-level="${esc(lv)}" value="${esc(g.key)}" checked><span>${esc(g.key)}<small class="rng-stat" data-key="${esc(g.key)}"></small></span><b>${g.count}</b></label>`).join('')}</div>`).join('');
   const g = dailyGoal(), dc = todayCount(), strk = liveStreak(), du = daysUntilExam();
   const et = examTarget();
   const goalHit = dc >= g;
@@ -688,6 +688,7 @@ function home() {
       </div>
       <div class="row range-head"><span class="muted" id="range-sum"></span>
         <span><button id="sel-all">全選</button><button id="sel-none">清除</button></span></div>
+      <div class="src-sum" id="src-sum"></div>
       <div id="ranges">${ranges}</div>
       <label>關鍵字（選填）
         <input id="pr-kw" placeholder="例如 RAG、特徵工程、Transformer">
@@ -745,6 +746,30 @@ function home() {
     } else {
       $('#range-sum').textContent = `已選範圍共 ${s.total} 題（${tag} · 未做過 ${s.new} · 錯題 ${s.wrong} · 鞏固中 ${s.reviewing} · 已掌握 ${s.mastered}）`;
     }
+    renderBreakdowns();
+  };
+  // 細項明細:每個章節旁顯示它自己的進度(不論有沒有勾,方便決定要勾哪些);
+  // 下方依來源拆(套用目前勾選的章節,但不套用「來源」篩選,才看得到各來源的比較)。分類定義同 practiceSummary。
+  const SRC_ORDER = ['歷屆', '學習指引', '自編模擬', 'AI種子班測驗'];
+  const SRC_LABEL = { '歷屆': '歷屆', '學習指引': '學習指引', '自編模擬': '自編模擬', 'AI種子班測驗': '外部課程' };
+  const statParts = (x) => [
+    x.new ? `<i class="st-new">新 ${x.new}</i>` : '',
+    x.wrong ? `<i class="st-wrong">錯 ${x.wrong}</i>` : '',
+    x.reviewing ? `<i class="st-rev">鞏固 ${x.reviewing}</i>` : '',
+    x.mastered ? `<i class="st-ok">熟 ${x.mastered}</i>` : '',
+  ].filter(Boolean).join('');
+  const renderBreakdowns = () => {
+    const c = readCriteria();
+    const now = Date.now();
+    const byRange = practiceSummaryBy(filterPool({ ...c, keys: { has: () => true } }), store.q, rangeKey, now);
+    view.querySelectorAll('.rng-stat').forEach((el) => {
+      const x = byRange.get(el.dataset.key);
+      el.innerHTML = x && x.total ? statParts(x) : '<i class="st-none">（目前篩選下無題）</i>';
+    });
+    const bySrc = practiceSummaryBy(filterPool({ ...c, src: '' }), store.q, srcOf, now, SRC_ORDER);
+    const rows = [...bySrc].filter(([, x]) => x.total).map(([k, x]) =>
+      `<div class="src-row${c.src && c.src !== k ? ' dim' : ''}"><span>${esc(SRC_LABEL[k] || k)}</span><b>${x.total}</b>${statParts(x)}</div>`);
+    $('#src-sum').innerHTML = rows.length ? `<div class="src-title">依來源（已勾選章節）</div>${rows.join('')}` : '';
   };
   const setLevelTab = (lv) => {
     activeLevel = lv;
