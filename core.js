@@ -202,12 +202,13 @@ export function toMarkdown(questions, progress, title = 'iPAS 筆記') {
 }
 
 // 整理成 Notion Toggle Active Recall 遮答格式（含 題目｜答案｜考生回答｜AI 檢查標準格式）
-export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與複習筆記') {
+export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與複習筆記', terms = {}) {
   const lines = [`# ${title}`, ''];
   let n = 0;
   for (const q of questions) {
     const p = (progress && progress[q.id]) || {};
-    if (!p.starred && !p.note && !p.studentAnswer && (p.wrong || 0) === 0) continue;
+    const qTerms = termsForQuestion(terms, q.id);
+    if (!p.starred && !p.note && !p.studentAnswer && !qTerms.length && (p.wrong || 0) === 0) continue;
     n++;
     const kw = q.topic || q.chapter || q.subject;
     lines.push(`### ${n}. 【${q.level}・${kw}】${q.question}`);
@@ -227,6 +228,10 @@ export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與
       lines.push('');
       lines.push('> **【AI 檢查考生回答與考點解析】**：');
       q.explanation.split('\n').forEach((l) => lines.push(`> ${l}`));
+    }
+    for (const c of qTerms) {
+      lines.push('');
+      lines.push(`> **🔑 我的名詞卡**：${c.term} → ${c.mine || '（還沒寫）'}`);
     }
     if (p.note) {
       lines.push('');
@@ -664,6 +669,9 @@ export function isSystemManagedBlock(b, q = {}) {
 // 智慧深度合併兩份進度（唯一作答事件去重 + 自洽統計快照 + 獨立屬性時間戳 + 重設版本隔離）
 export function mergeStores(target, incoming, todayStr = new Date().toISOString().slice(0, 10)) {
   if (!incoming || !incoming.q) return target;
+  // 舊版(本機分支)把名詞卡存在 q[qid].keywordCard;先搬進 terms,否則下面重建每題物件時會被丟掉
+  target = migrateKeywordCards(structuredClone(target));
+  incoming = migrateKeywordCards(structuredClone(incoming));
   const out = structuredClone(target);
   out.q ||= {};
   out.cards ||= {};
@@ -943,6 +951,9 @@ export function mergeStores(target, incoming, todayStr = new Date().toISOString(
     out.recent = candidateRecent.slice(-50);
   }
 
+  // 7. 名詞卡 terms:各卡內容/排程各比自己的時間戳,題目取聯集(見 mergeTerms)
+  out.terms = mergeTerms(target.terms || {}, incoming.terms || {});
+
   out.updatedAt = Math.max(out.updatedAt || 0, incoming.updatedAt || 0);
   return out;
 }
@@ -1071,4 +1082,250 @@ export async function syncQuestionToNotion(q, p = {}, { dbId, callNotion, fetchD
     }
   }
   return result;
+}
+
+// ================= 名詞卡（關鍵字 → 一句自己的話） =================
+// 設計原則:卡片內容一律由考生自己寫(提取練習),工具只負責提醒、排程與檢查;不自動產生名詞卡。
+// 存在 store.terms = { [id]: card },不放進 store.q[qid]——mergeStores 會用固定欄位重建每題物件,
+// 塞在題目底下的新欄位同步時會被靜默丟掉。
+
+// 名詞正規化:去頭尾空白、壓縮空白、英文轉小寫(RAG / rag / Rag 視為同一張卡)
+export function normTerm(s = '') {
+  return String(s).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+// 卡片 id 由正規化名詞決定(FNV-1a):兩台裝置各自建立同一個名詞,同步後仍是同一張卡,不會重複
+export function termId(term) {
+  const s = normTerm(term);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return 't_' + h.toString(16).padStart(8, '0');
+}
+
+export const isLiveTerm = (c) => !!(c && !c.deleted && c.term);
+
+// 新增或更新名詞卡;同名卡存在就把這題掛上去(mine 有填才覆寫)。新卡第一次複習排在 1 天後。
+export function upsertTerm(terms, { term, mine = '', qid = null }, now = Date.now()) {
+  const t = String(term || '').trim().replace(/\s+/g, ' ');
+  if (!t) return null;
+  const id = termId(t);
+  const prev = terms[id];
+  const live = isLiveTerm(prev);
+  const qids = new Set(live ? (prev.qids || []) : []);
+  if (qid) qids.add(qid);
+  const m = String(mine || '').trim();
+  const card = {
+    id,
+    term: live ? prev.term : t,
+    mine: m || (live ? prev.mine || '' : ''),
+    qids: [...qids].sort(),
+    createdAt: live ? prev.createdAt : now,
+    updatedAt: now,
+    reviewStage: live ? (prev.reviewStage || 0) : 0,
+    reviewDue: live ? prev.reviewDue : now + EBBINGHAUS_INTERVALS_DAYS[0] * 86400000,
+    reviewUpdatedAt: live ? (prev.reviewUpdatedAt || now) : now,
+  };
+  terms[id] = card;
+  return card;
+}
+
+// 刪除留墓碑:否則另一台裝置下次同步會把卡片「復活」
+export function deleteTerm(terms, id, now = Date.now()) {
+  if (!terms[id]) return;
+  terms[id] = { id, deleted: true, updatedAt: now, qids: [] };
+}
+
+// 名詞卡複習:記得 → 往下一個間隔;忘了 → 回第 1 階段(同題目的艾賓浩斯間隔)
+export function reviewTerm(card, remembered, now = Date.now()) {
+  const next = calcNextReview(card.reviewStage || 0, remembered, now);
+  card.reviewStage = next.stage;
+  card.reviewDue = next.due;
+  card.reviewUpdatedAt = now;
+  return next;
+}
+
+export function dueTerms(terms = {}, now = Date.now()) {
+  return Object.values(terms)
+    .filter((c) => isLiveTerm(c) && c.reviewDue && c.reviewDue <= now)
+    .sort((a, b) => a.reviewDue - b.reviewDue);
+}
+
+export function termsForQuestion(terms = {}, qid) {
+  return Object.values(terms).filter((c) => isLiveTerm(c) && (c.qids || []).includes(qid));
+}
+
+// 跨題練習的出題池:題幹/選項/topic/章節/詳解含這個名詞的題目 + 當初抽出這張卡的題目(不管章節,刻意交錯)。
+// 含詳解:有些題考的是這個概念、題幹卻沒寫出名詞,這種題最能測出是不是真的懂(詳解在作答前不會顯示)。
+export function questionsForTerm(questions = [], card) {
+  const kw = normTerm(card.term);
+  const linked = new Set(card.qids || []);
+  return questions.filter((q) => linked.has(q.id)
+    || `${q.question} ${(q.options || []).join(' ')} ${q.topic || ''} ${q.chapter || ''} ${q.explanation || ''}`.toLowerCase().includes(kw));
+}
+
+// 合併兩端名詞卡:內容(名詞/句子/刪除)比 updatedAt、複習排程比 reviewUpdatedAt,兩者分開判斷;
+// 掛的題目取聯集。各比各的時間戳,否則 A 機改句子、B 機做複習,同步後其中一邊會被蓋掉。
+export function mergeTerms(a = {}, b = {}) {
+  const out = {};
+  const ids = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const id of ids) {
+    const x = a?.[id];
+    const y = b?.[id];
+    if (!x || !y) { out[id] = structuredClone(x || y); continue; }
+    const content = (y.updatedAt || 0) > (x.updatedAt || 0) ? y : x;
+    if (content.deleted) { out[id] = structuredClone(content); continue; }
+    const other = content === x ? y : x;
+    const rev = [x, y].filter((c) => !c.deleted)
+      .reduce((w, c) => ((c.reviewUpdatedAt || 0) > (w.reviewUpdatedAt || 0) ? c : w), content);
+    const qids = new Set([...(content.qids || []), ...(other.deleted ? [] : other.qids || [])]);
+    out[id] = {
+      ...structuredClone(content),
+      qids: [...qids].sort(),
+      reviewStage: rev.reviewStage,
+      reviewDue: rev.reviewDue,
+      reviewUpdatedAt: rev.reviewUpdatedAt || 0,
+    };
+  }
+  return out;
+}
+
+// 照抄偵測:回傳「自己的話」與詳解/題目之間最長的共同片段(忽略空白與標點)。
+// 長度 ≥ 12 字就提醒「這句像是照抄」——抄寫不是提取,記不住。
+export function longestCopy(mine = '', sources = []) {
+  const clean = (s) => String(s || '').replace(/[\s，,。.、；;：:！!？?「」『』（）()【】\[\]"'“”‘’\-—_/]/g, '');
+  const a = clean(mine);
+  let best = '';
+  if (a.length < 2) return best;
+  for (const src of sources) {
+    const b = clean(src);
+    if (!b) continue;
+    let prev = new Array(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i++) {
+      const cur = new Array(b.length + 1).fill(0);
+      for (let j = 1; j <= b.length; j++) {
+        if (a[i - 1] === b[j - 1]) {
+          cur[j] = prev[j - 1] + 1;
+          if (cur[j] > best.length) best = a.slice(i - cur[j], i);
+        }
+      }
+      prev = cur;
+    }
+  }
+  return best;
+}
+export const COPY_WARN_LEN = 12;
+
+// 題幹「決定性字眼」:答題方向取決於它們(最適合 vs 最不適合、屬於 vs 不屬於)。
+// 由長到短比對,較長的詞優先(「最不適合」不會被拆成「最」+「不適合」)。
+export const DECISIVE_WORDS = [
+  '何者為非', '何者錯誤', '何者有誤', '何者不正確', '何者不是', '敘述錯誤', '錯誤的是',
+  '最不適合', '最不可能', '最不需要', '最不重要', '最適合', '最適當', '最恰當', '最可能', '最主要', '最重要', '最關鍵', '最優先', '最有效', '最佳', '最先', '最常',
+  '最符合', '最為正確', '最正確', '最合理', '最為適合', '最能', '最接近', '最典型', '最普遍', '最直接', '較符合', '較適合', '較合理', '最為合適', '何者為正確', '何者正確', '敘述正確',
+  '首要', '首先', '優先', '第一步', '主要', '而非', '非必要', '錯誤的', '有誤',
+  '不屬於', '不包含', '不包括', '不正確', '不適用', '不適合', '不需要', '不可能', '不應', '不會', '不是', '並非', '無法', '除外', '例外',
+];
+export function findDecisiveWords(stem = '') {
+  const words = [...DECISIVE_WORDS].sort((x, y) => y.length - x.length);
+  const hits = [];
+  const taken = new Array(stem.length).fill(false);
+  for (const w of words) {
+    let from = 0;
+    for (;;) {
+      const at = stem.indexOf(w, from);
+      if (at < 0) break;
+      from = at + 1;
+      if (taken.slice(at, at + w.length).some(Boolean)) continue;
+      for (let k = at; k < at + w.length; k++) taken[k] = true;
+      hits.push({ word: w, at });
+    }
+  }
+  return hits.sort((x, y) => x.at - y.at);
+}
+
+// 給 AI 的檢查提示:AI 只當審閱者,不替考生重寫(不然又回到「它教、你操作」)
+export function buildTermCheckPrompt(card, q = null) {
+  const L = 'ABCDEFG';
+  const lines = [
+    '請你當我的審閱者,檢查我自己寫的名詞解釋。規則:',
+    '1. 不要直接給我「正確版本」或改寫好的句子,只指出問題,讓我自己改。',
+    '2. 指出:哪裡不精確或錯誤、漏了哪個關鍵條件、最容易跟哪個名詞搞混(差在哪)。',
+    '3. 最後用一行給評等:✅ 可以 / ⚠️ 大致對但不精確 / ❌ 有錯。',
+    '',
+    `【名詞】${card.term}`,
+    `【我自己的話】${card.mine || '(還沒寫)'}`,
+  ];
+  if (q) {
+    lines.push('', '【我是在這題答錯後抽出這個名詞的】', q.question);
+    (q.options || []).forEach((o, i) => lines.push(`(${L[i]}) ${o}`));
+    lines.push(`正解:(${L[q.answer]}) ${q.options[q.answer]}`);
+    if (q.explanation) lines.push(`題庫詳解:${q.explanation}`);
+  }
+  return lines.join('\n');
+}
+
+export function termsToMarkdown(terms = {}, questions = []) {
+  const byId = new Map(questions.map((q) => [q.id, q]));
+  const cards = Object.values(terms).filter(isLiveTerm).sort((a, b) => a.term.localeCompare(b.term, 'zh-Hant'));
+  const out = ['# 我的名詞卡', ''];
+  for (const c of cards) {
+    out.push(`## ${c.term}`, '', c.mine || '(還沒寫)', '');
+    const qs = (c.qids || []).map((id) => byId.get(id)).filter(Boolean);
+    if (qs.length) {
+      out.push('出處:');
+      for (const q of qs) out.push(`- ${q.question.slice(0, 60)}${q.question.length > 60 ? '…' : ''}`);
+      out.push('');
+    }
+  }
+  return out.join('\n');
+}
+
+// 舊版資料遷移:q[qid].keywordCard = { keyword, userSentence, updatedAt } → store.terms(冪等)
+export function migrateKeywordCards(s) {
+  if (!s || !s.q) return s;
+  s.terms ||= {};
+  for (const [qid, p] of Object.entries(s.q)) {
+    const kc = p && p.keywordCard;
+    if (!kc) continue;
+    if (kc.keyword && String(kc.keyword).trim()) {
+      const t = kc.updatedAt || p.noteUpdatedAt || p.updatedAt || 1;
+      const id = termId(kc.keyword);
+      const prev = s.terms[id];
+      // 已有較新的同名卡(含刪除墓碑)就只掛題目,不覆寫句子
+      if (prev && (prev.updatedAt || 0) >= t) {
+        if (!prev.deleted && !(prev.qids || []).includes(qid)) prev.qids = [...(prev.qids || []), qid].sort();
+      } else {
+        upsertTerm(s.terms, { term: kc.keyword, mine: kc.userSentence || '', qid }, t);
+      }
+    }
+    delete p.keywordCard;
+  }
+  return s;
+}
+
+// 題幹 HTML:轉義後標出決定性字眼(純函數,含 XSS 防護測試)
+export function escHtml(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+export function highlightDecisive(stem) {
+  const text = String(stem ?? '');
+  let out = '', at = 0;
+  for (const h of findDecisiveWords(text)) {
+    out += escHtml(text.slice(at, h.at)) + `<mark class="dw">${escHtml(h.word)}</mark>`;
+    at = h.at + h.word.length;
+  }
+  return out + escHtml(text.slice(at));
+}
+
+// 本機即時檢查:抽的名詞跟這題有沒有關係(打錯字、抽錯詞會立刻看到)。
+// 只檢查「名詞切不切題」,不評句子好壞——句子對不對要對照詳解或請 AI 挑錯。
+export function termRelevance(q, term) {
+  const kw = normTerm(term);
+  if (!kw || !q) return 'empty';
+  const core = `${q.topic || ''} ${q.chapter || ''} ${q.explanation || ''} ${(q.options || [])[q.answer] || ''}`.toLowerCase();
+  if (core.includes(kw)) return 'core';
+  const rest = `${q.question || ''} ${(q.options || []).join(' ')}`.toLowerCase();
+  return rest.includes(kw) ? 'mentioned' : 'absent';
 }

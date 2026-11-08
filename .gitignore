@@ -7,3 +7,8 @@ resource-change.md
 resource-change-title.txt
 
 local-progress.json
+images/IPAS書/
+images/ocr_raw/
+.runtime/
+# 市售書籍的掃描/OCR 講義只留本機自讀,不可進公開 repo(版權)
+docs/IPAS_書本講義/
