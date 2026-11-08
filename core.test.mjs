@@ -596,3 +596,82 @@ import './notion_sync.test.mjs';
   }
   console.log('PASS (CORS Allow-Methods 涵蓋 Notion 呼叫方法: ' + [...used].join(',') + ')');
 }
+
+// ---- 名詞卡(關鍵字 → 一句自己的話) ----
+import { normTerm, termId, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, mergeTerms, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, mergeStores as mergeStoresT } from './core.js';
+{
+  const DAY = 86400000;
+  // 同一名詞不分大小寫/空白 = 同一張卡;第二題掛上去,不重建
+  assert.equal(normTerm('  Retrieval   Augmented '), 'retrieval augmented');
+  assert.equal(termId('RAG'), termId(' rag '));
+  const T = {};
+  const c1 = upsertTerm(T, { term: 'RAG', mine: '先查資料再生成', qid: 'q1' }, 1000);
+  assert.equal(c1.reviewDue, 1000 + DAY, '新卡 1 天後第一次複習');
+  const c2 = upsertTerm(T, { term: 'rag', qid: 'q2' }, 2000);
+  assert.equal(Object.keys(T).length, 1, '同名詞不重複建卡');
+  assert.deepEqual(c2.qids, ['q1', 'q2']);
+  assert.equal(c2.mine, '先查資料再生成', 'mine 沒填不可清掉原本的句子');
+  assert.equal(c2.term, 'RAG', '保留第一次的寫法');
+  assert.equal(upsertTerm(T, { term: '   ' }), null, '空名詞不建卡');
+  assert.equal(termsForQuestion(T, 'q2').length, 1);
+
+  // 複習:記得往後推、忘了回第 1 階段
+  reviewTerm(T[c1.id], true, 5000);
+  assert.equal(T[c1.id].reviewStage, 1);
+  reviewTerm(T[c1.id], true, 5000);
+  assert.equal(T[c1.id].reviewStage, 2);
+  assert.equal(T[c1.id].reviewDue, 5000 + 3 * DAY);
+  reviewTerm(T[c1.id], false, 6000);
+  assert.equal(T[c1.id].reviewStage, 1);
+  assert.equal(dueTerms(T, 6000 + DAY).length, 1);
+  assert.equal(dueTerms(T, 6000).length, 0);
+
+  // 跨題練習池:含名詞的題 + 當初抽卡的題(即使題目文字沒出現該詞)
+  const qsT = [
+    { id: 'q1', question: '下列何者描述 RAG?', options: ['a', 'b'] },
+    { id: 'q2', question: '檢索增強生成的用途', options: ['a', 'b'] },
+    { id: 'q3', question: '無關題', options: ['x', 'rag 系統'] },
+    { id: 'q4', question: '無關題', options: ['x', 'y'] },
+  ];
+  assert.deepEqual(questionsForTerm(qsT, T[c1.id]).map((q) => q.id), ['q1', 'q2', 'q3']);
+
+  // 合併:內容比 updatedAt、排程比 reviewUpdatedAt,各自獨立;題目取聯集
+  const A = { x: { id: 'x', term: 'RAG', mine: 'A 新句子', qids: ['q1'], updatedAt: 300, reviewStage: 1, reviewDue: 10, reviewUpdatedAt: 100 } };
+  const B = { x: { id: 'x', term: 'RAG', mine: 'B 舊句子', qids: ['q2'], updatedAt: 200, reviewStage: 3, reviewDue: 99, reviewUpdatedAt: 400 } };
+  const M = mergeTerms(A, B);
+  assert.equal(M.x.mine, 'A 新句子', '句子以較新內容為準');
+  assert.equal(M.x.reviewStage, 3, '排程以較新的複習為準,不被句子的時間戳蓋掉');
+  assert.deepEqual(M.x.qids, ['q1', 'q2']);
+  assert.deepEqual(mergeTerms(B, A), M, '合併與方向無關');
+  // 刪除墓碑:較新的刪除會贏,不讓另一台裝置把卡復活
+  const D = structuredClone(A); deleteTerm(D, 'x', 500);
+  assert.equal(mergeTerms(D, B).x.deleted, true);
+  assert.equal(mergeTerms(B, D).x.deleted, true);
+  assert.equal(dueTerms(mergeTerms(B, D), 1e12).length, 0);
+  // 刪掉後重新建立同名卡:比墓碑新,要能復活
+  upsertTerm(D, { term: 'RAG', mine: '重寫', qid: 'q9' }, 600);
+  assert.equal(mergeTerms(D, B)[termId('RAG')]?.mine, '重寫');
+
+  // mergeStores 一定要帶上 terms(曾經的教訓:新欄位沒寫進合併就會在同步時靜默消失)
+  const sA = { q: {}, terms: { x: A.x }, updatedAt: 1 };
+  const sB = { q: {}, terms: { y: { id: 'y', term: 'LLM', mine: '大型語言模型', qids: [], updatedAt: 5 } }, updatedAt: 2 };
+  const sM = mergeStoresT(sA, sB);
+  assert.ok(sM.terms.x && sM.terms.y, 'mergeStores 要保留兩端的名詞卡');
+
+  // 照抄偵測
+  const exp = 'RAG 會先從外部知識庫檢索相關文件,再交給大型語言模型生成答案,可降低幻覺。';
+  assert.ok(longestCopy('先從外部知識庫檢索相關文件再交給大型語言模型', [exp]).length >= COPY_WARN_LEN, '整段照抄要被抓到');
+  assert.ok(longestCopy('先查資料,再讓模型回答,比較不會亂掰', [exp]).length < COPY_WARN_LEN, '自己的話不可誤報');
+  assert.equal(longestCopy('', [exp]), '');
+
+  // 決定性字眼:長詞優先、不重疊、依出現順序
+  assert.deepEqual(findDecisiveWords('下列何者最不適合用於分類?').map((h) => h.word), ['最不適合']);
+  assert.deepEqual(findDecisiveWords('下列何者不屬於監督式學習?').map((h) => h.word), ['不屬於']);
+  assert.deepEqual(findDecisiveWords('導入時首先應該做什麼?最適合的是').map((h) => h.word), ['首先', '最適合']);
+  assert.deepEqual(findDecisiveWords('一般敘述'), []);
+
+  // AI 檢查提示:必須要求 AI 只審不寫,並帶上考生自己的句子
+  const pr = buildTermCheckPrompt({ term: 'RAG', mine: '先查資料再生成' }, { question: 'Q?', options: ['a', 'b'], answer: 1, explanation: 'E' });
+  assert.ok(pr.includes('不要直接給我') && pr.includes('先查資料再生成') && pr.includes('正解:(B) b'));
+  console.log('PASS (名詞卡:建卡/去重、複習排程、跨題練習池、合併與墓碑、照抄偵測、決定性字眼)');
+}

@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -49,6 +49,7 @@ function load() {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
     if (s && s.q) {
       s.cards ||= {};
+      s.terms ||= {}; // 名詞卡(關鍵字 → 一句自己的話)
       // 安全遷移：將舊版留在 store.settings 的 Notion 金鑰轉移至本機 localStorage 並從 store 抹除
       if (s.settings?.notionToken) {
         if (!localStorage.getItem('ipas_notion_token')) localStorage.setItem('ipas_notion_token', s.settings.notionToken);
@@ -65,7 +66,7 @@ function load() {
       return s;
     }
   } catch {}
-  return { v: 1, syncCode: makeCode(), codeFresh: true, q: {}, cards: {}, recent: [], updatedAt: 0 };
+  return { v: 1, syncCode: makeCode(), codeFresh: true, q: {}, cards: {}, terms: {}, recent: [], updatedAt: 0 };
 }
 
 // 艾賓浩斯遺忘曲線到期檢索
@@ -645,6 +646,17 @@ function home() {
       </div>
     </section>` : '';
 
+  const dueTs = dueTerms(store.terms, Date.now());
+  const termBanner = dueTs.length ? `
+    <section class="card review-card">
+      <div class="row">
+        <div><h3 style="margin:0">🔑 名詞卡 · 今日到期</h3>
+          <p class="muted" style="margin:4px 0 0">有 <b>${dueTs.length}</b> 張名詞卡到期。先回想、再翻面。</p></div>
+        <button class="primary" id="start-term-review" style="margin:0;padding:8px 14px;white-space:nowrap">複習名詞卡 (${dueTs.length})</button>
+      </div>
+    </section>` : '';
+  const myTerms = liveTerms().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 12);
+
   const bCount = DATA.questions.filter((q) => q.level === '初級').length;
   const mCount = DATA.questions.filter((q) => q.level === '中級').length;
   const totalCount = DATA.questions.length;
@@ -677,7 +689,7 @@ function home() {
       </div>
     </section>
   `;
-  view.innerHTML = `${dailyStrip}${featureUpgradeBanner}${mockSessBanner}${reviewBanner}${challengeCard}${conceptCard}
+  view.innerHTML = `${dailyStrip}${featureUpgradeBanner}${mockSessBanner}${reviewBanner}${termBanner}${challengeCard}${conceptCard}
     <section class="card">
       <h2>練習模式</h2>
       <p class="muted">即時看答案與解析。切換級別並勾選要練的範圍，預設全選。</p>
@@ -693,6 +705,8 @@ function home() {
       <label>關鍵字（選填）
         <input id="pr-kw" placeholder="例如 RAG、特徵工程、Transformer">
       </label>
+      ${myTerms.length ? `<div class="term-chips"><span class="muted">我的名詞卡（點一下＝跨章節練含這個詞的題）：</span>${myTerms.map((c) => `<button class="term-chip" data-id="${c.id}">${esc(c.term)}</button>`).join('')}</div>` : ''}
+      <label class="check-line"><input type="checkbox" id="pr-stemfirst" ${stemFirstOn() ? 'checked' : ''}> 先讀題幹：自己圈出決定性字眼（最適合／不屬於／首要…）再看選項</label>
       <label>出題方式
         <select id="pr-mode">
           <option value="smart">智慧排程（沒做過的新題與錯題優先）</option>
@@ -796,6 +810,21 @@ function home() {
   });
   view.querySelectorAll('.rng').forEach((c) => (c.onchange = updateSum));
   $('#pr-kw').oninput = updateSum;
+  // 名詞 chip:填進關鍵字並把範圍全選——交錯練習要跨章節,不能只在目前勾的章節裡找
+  view.querySelectorAll('.term-chip').forEach((b) => (b.onclick = () => {
+    const c = store.terms[b.dataset.id];
+    if (!c) return;
+    $('#pr-kw').value = c.term;
+    view.querySelectorAll('.rng').forEach((x) => (x.checked = true));
+    updateSum();
+    $('#pr-kw').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
+  $('#pr-stemfirst').onchange = (e) => {
+    store.settings ||= { dailyGoal: 20, examDate: '' };
+    store.settings.stemFirst = e.target.checked;
+    save();
+  };
+  if ($('#start-term-review')) $('#start-term-review').onclick = () => termReview(dueTs);
   $('#pr-source').onchange = updateSum;
   $('#pr-mode').onchange = updateSum;
   $('#sel-all').onclick = () => {
@@ -882,6 +911,41 @@ function home() {
   updateSum();
 }
 
+// ---- 名詞卡 / 決定性字眼 共用 ----
+const stemFirstOn = () => !!store.settings?.stemFirst;
+// 題幹標出決定性字眼(作答「後」才標:先讓考生自己圈,工具只負責對答案)
+function highlightStem(stem) {
+  const hits = findDecisiveWords(stem);
+  if (!hits.length) return esc(stem);
+  let out = '', at = 0;
+  for (const h of hits) {
+    out += esc(stem.slice(at, h.at)) + `<mark class="dw">${esc(h.word)}</mark>`;
+    at = h.at + h.word.length;
+  }
+  return out + esc(stem.slice(at));
+}
+const liveTerms = () => Object.values(store.terms || {}).filter(isLiveTerm);
+function copyWarnHtml(mine, q) {
+  if (!q || !mine) return '';
+  const hit = longestCopy(mine, [q.explanation, q.question, ...(q.options || [])]);
+  return hit.length >= COPY_WARN_LEN
+    ? `⚠️ 這句和題目/詳解有一大段幾乎一樣（「${esc(hit.slice(0, 24))}${hit.length > 24 ? '…' : ''}」）。照抄不是提取，換成你自己的說法會記得比較久。`
+    : '';
+}
+const AI_LINKS = `<a href="https://claude.ai/new" target="_blank" rel="noopener">開 Claude</a>・<a href="https://chatgpt.com/" target="_blank" rel="noopener">開 ChatGPT</a>`;
+async function copyTermPrompt(card, q, msgEl) {
+  if (!String(card.mine || '').trim()) {
+    msgEl.innerHTML = '先自己寫一句，再請 AI 檢查。AI 只負責挑錯，不負責幫你寫。';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(buildTermCheckPrompt(card, q));
+    msgEl.innerHTML = `✓ 已複製檢查提示。貼給 AI（${AI_LINKS}），照它指出的問題<b>自己</b>改句子再儲存。`;
+  } catch {
+    msgEl.textContent = '複製失敗（瀏覽器不允許存取剪貼簿）。';
+  }
+}
+
 function runPractice(pool, opts = {}) {
   clearMockTimer();
   let i = 0;
@@ -889,6 +953,10 @@ function runPractice(pool, opts = {}) {
   let showCurrentMeta = false;
   const sessionWrong = [];
   const scored = new Map(); // 題序 → { k, next }：已計分的題目，重繪時只還原畫面、不再計分
+  const sessionTerms = new Set(); // 本次練習存下的名詞卡 id
+  const nudged = new Set(); // 錯題沒抽關鍵字就按下一題:提醒過一次的題序
+  const optsShown = new Set(); // 「先讀題幹」模式下已打開選項的題序
+  const drafts = new Map(); // 題序 → 尚未儲存的 { term, mine }:星標/提示會重繪畫面,不能讓打到一半的字消失
 
   if (!pool.length) {
     view.innerHTML = `
@@ -906,6 +974,7 @@ function runPractice(pool, opts = {}) {
     const p = qp(q.id);
     const reviewBtnClass = p.reviewDue ? 'review-btn active' : 'review-btn';
     const reviewBtnText = p.reviewDue ? '🧠 複習中' : '🧠 加入複習';
+    const gateOpts = stemFirstOn() && !scored.has(i) && !optsShown.has(i);
 
     view.innerHTML = `
       <section class="card">
@@ -925,11 +994,20 @@ function runPractice(pool, opts = {}) {
             : ''}
         </div>
         ${srcBadge(q)}
-        <h3>${esc(q.question)}</h3>
+        <h3 id="qstem">${esc(q.question)}</h3>
         ${q.image ? `<img class="qfig" src="${esc(q.image)}" alt="題目附圖" loading="lazy">` : ''}
-        <div id="opts">${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
+        ${gateOpts ? `<div class="stem-gate" id="stem-gate">
+          <p>先讀題幹：這題的<b>決定性字眼</b>是什麼？（例如「最適合」「不屬於」「首要」）心裡圈好再看選項。</p>
+          <button class="primary" id="show-opts">我圈好了，看選項</button>
+        </div>` : ''}
+        <div id="opts"${gateOpts ? ' hidden' : ''}>${q.options.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
         <div id="fb"></div>
       </section>`;
+    if (gateOpts) $('#show-opts').onclick = () => {
+      optsShown.add(i);
+      $('#stem-gate').remove();
+      $('#opts').hidden = false;
+    };
 
     $('#star').onclick = () => {
       p.starred = !p.starred;
@@ -1005,6 +1083,27 @@ function runPractice(pool, opts = {}) {
       if (idx === q.answer) b.classList.add('correct');
       if (idx === k && !correct) b.classList.add('wrong');
     });
+    if ($('#stem-gate')) { $('#stem-gate').remove(); $('#opts').hidden = false; }
+    const dwHits = findDecisiveWords(q.question);
+    if ($('#qstem')) $('#qstem').innerHTML = highlightStem(q.question);
+    const dwLine = dwHits.length
+      ? `<p class="dw-line">🔎 題幹決定性字眼：${[...new Set(dwHits.map((h) => h.word))].map((w) => `<mark class="dw">${esc(w)}</mark>`).join(' ')}　${stemFirstOn() ? '——跟你剛才圈的一樣嗎？' : ''}</p>`
+      : '';
+    const linkedTerms = termsForQuestion(store.terms, q.id);
+    const termForm = `
+        ${linkedTerms.length ? `<div class="term-linked">${linkedTerms.map((c) => `<div>✓ 已抽：<b>${esc(c.term)}</b> → ${c.mine ? esc(c.mine) : '<span class="muted">（還沒寫句子）</span>'}</div>`).join('')}</div>` : ''}
+        <input id="term-in" placeholder="卡在哪個名詞？例如 RAG、過擬合、混淆矩陣" autocomplete="off">
+        <p class="term-hint muted" id="term-exist"></p>
+        <textarea id="term-mine" rows="2" placeholder="用一句「你自己的話」說明它。寫錯沒關係，先寫再對照詳解。"></textarea>
+        <p class="term-warn" id="term-warn"></p>
+        <div class="term-actions">
+          <button class="primary" id="term-save">儲存名詞卡</button>
+          <button id="term-ai">📋 複製給 AI 檢查</button>
+        </div>
+        <p class="muted term-msg" id="term-msg"></p>`;
+    const termBox = !correct
+      ? `<div class="term-box" id="term-box"><div class="term-title">🔑 錯一題，抽一個關鍵字：<span class="muted">關鍵字 → 一句你自己的話</span></div>${termForm}</div>`
+      : `<details class="term-box ok"${linkedTerms.length ? ' open' : ''}><summary>🔑 抽一個關鍵字（選填）</summary>${termForm}</details>`;
 
     const relatedCards = (GUIDE_DATA.cards || []).filter((c) => {
       if (q.syllabusItem && c.syllabusItem === q.syllabusItem) return true;
@@ -1017,7 +1116,9 @@ function runPractice(pool, opts = {}) {
 
     $('#fb').innerHTML = `
       <p class="${correct ? 'ok' : 'bad'}">${correct ? '答對' : '答錯'}（正解：${esc(q.options[q.answer])}）</p>
+      ${dwLine}
       ${reviewUpdateMsg ? `<div>${reviewUpdateMsg}</div>` : ''}
+      ${termBox}
       ${q.explanation ? `<p class="exp">${formatExp(q.explanation)}</p>` : ''}
       ${guideLine(q)}
       ${cardShortcut ? `<div>${cardShortcut}</div>` : ''}
@@ -1045,8 +1146,45 @@ function runPractice(pool, opts = {}) {
       <label class="note">筆記<textarea id="note" rows="2" placeholder="寫下你的個人重點摘要…">${esc(p.note || '')}</textarea></label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
         <button class="primary" id="next" style="margin:0">${i + 1 < pool.length ? '下一題' : '完成'}</button>
+        <span class="term-warn" id="next-nudge"></span>
         ${i + 1 < pool.length ? `<button id="early-finish" style="margin:0;background:#f8fafc;border:1px solid #cbd5e1;color:#475569">提早結束本次練習（已做 ${i + 1} 題）</button>` : ''}
       </div>`;
+
+    // 名詞卡:同名卡已存在就提示會「掛上這題」;句子即時做照抄檢查
+    const termIn = $('#term-in'), termMine = $('#term-mine');
+    const existingCard = () => { const id = termId(termIn.value); const c = store.terms[id]; return isLiveTerm(c) ? c : null; };
+    const d = drafts.get(i);
+    if (d) { termIn.value = d.term; termMine.value = d.mine; $('#term-warn').innerHTML = copyWarnHtml(d.mine, q); }
+    const keepDraft = () => drafts.set(i, { term: termIn.value, mine: termMine.value });
+    termIn.oninput = () => {
+      keepDraft();
+      const c = existingCard();
+      $('#term-exist').innerHTML = c
+        ? `已經有這張卡：「${esc(c.mine || '（還沒寫句子）')}」。儲存會把這題掛上去；下面留空就沿用原句，寫了就更新成新句子。`
+        : '';
+    };
+    termMine.oninput = () => { keepDraft(); $('#term-warn').innerHTML = copyWarnHtml(termMine.value, q); };
+    if (d?.term) termIn.oninput();
+    $('#term-save').onclick = () => {
+      const term = termIn.value.trim();
+      if (!term) { $('#term-msg').textContent = '先寫下一個關鍵字（一個名詞就好）。'; termIn.focus(); return; }
+      const c = upsertTerm(store.terms, { term, mine: termMine.value, qid: q.id });
+      sessionTerms.add(c.id);
+      save();
+      $('#next-nudge').textContent = '';
+      $('#term-msg').innerHTML = `✓ 已存：<b>${esc(c.term)}</b>（明天第一次複習）。${c.mine ? '' : '還沒寫句子，記得到「名詞卡」補上。'}`;
+      const linked = termsForQuestion(store.terms, q.id);
+      const box = $('#term-box') || view.querySelector('.term-box');
+      let list = box.querySelector('.term-linked');
+      if (!list) { list = document.createElement('div'); list.className = 'term-linked'; termIn.before(list); }
+      list.innerHTML = linked.map((x) => `<div>✓ 已抽：<b>${esc(x.term)}</b> → ${x.mine ? esc(x.mine) : '<span class="muted">（還沒寫句子）</span>'}</div>`).join('');
+      termIn.value = ''; termMine.value = ''; drafts.delete(i); $('#term-exist').textContent = ''; $('#term-warn').textContent = '';
+    };
+    $('#term-ai').onclick = () => {
+      const c = existingCard();
+      const mine = termMine.value.trim() || c?.mine || '';
+      copyTermPrompt({ term: termIn.value.trim() || '（未填）', mine }, q, $('#term-msg'));
+    };
 
     const renderAiFeedback = () => {
       const diag = diagnoseStudentAnswer(q, k, p.studentAnswer || '');
@@ -1167,6 +1305,13 @@ function runPractice(pool, opts = {}) {
     };
     if ($('#early-finish')) $('#early-finish').onclick = () => finish();
     $('#next').onclick = () => {
+      if (!correct && !termsForQuestion(store.terms, q.id).length && !nudged.has(i)) {
+        nudged.add(i);
+        $('#next-nudge').textContent = '這題還沒抽關鍵字。錯題是最好的素材——再按一次就跳過。';
+        $('#term-box')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        $('#term-in')?.focus({ preventScroll: true });
+        return;
+      }
       i++;
       showCurrentMeta = false;
       i < pool.length ? render() : finish();
@@ -1197,11 +1342,18 @@ function runPractice(pool, opts = {}) {
       </div>
     ` : '';
 
+    const missingTerm = [...new Set(sessionWrong)].filter((wq) => !termsForQuestion(store.terms, wq.id).length).length;
+    const termSummary = (sessionTerms.size || missingTerm) ? `
+      <div class="term-box">
+        🔑 本次抽了 <b>${sessionTerms.size}</b> 張名詞卡${missingTerm ? `，還有 <b>${missingTerm}</b> 題錯題沒抽關鍵字` : ''}。
+        <button id="goto-terms" style="margin-left:6px">去名詞卡</button>
+      </div>` : '';
     view.innerHTML = `
       <section class="card">
         <h2>練習完成</h2>
         <p class="score">${pct}％</p>
         <p>這組 ${total} 題，答對 ${right}、答錯 ${wrong}</p>
+        ${termSummary}
         ${weakDiagnosticHtml}
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
           ${sessionWrong.length ? `<button class="primary" id="redo-wrong">只練這次錯的 (${sessionWrong.length} 題)</button>` : '<p class="muted" style="margin:0">這組全對，太棒了！</p>'}
@@ -1228,6 +1380,7 @@ function runPractice(pool, opts = {}) {
       };
     });
     $('#again').onclick = () => runPractice(shuffle(pool.slice()), opts);
+    if ($('#goto-terms')) $('#goto-terms').onclick = termsView;
     $('#back').onclick = home;
   };
   render();
@@ -2380,7 +2533,112 @@ function deviceLabel() {
   return `${os} · ${br}`;
 }
 
-const ROUTES = { home, guide, mock: mockSetup, wrong: wrongbook, notes, stats, settings };
+// ---- 名詞卡頁 ----
+// 卡片內容一律由考生自己寫;這頁負責:到期複習(先回想再翻面)、改句子、跨題練習、請 AI 檢查。
+function termsView() {
+  setNav('terms');
+  const now = Date.now();
+  const all = liveTerms().sort((a, b) => (a.reviewDue || 0) - (b.reviewDue || 0));
+  const due = dueTerms(store.terms, now);
+  const qById = new Map(DATA.questions.map((q) => [q.id, q]));
+  view.innerHTML = `
+    <section class="card">
+      <h2>🔑 我的名詞卡</h2>
+      <p class="muted">錯題時抽出的關鍵字 → 一句你自己的話。複習時先回想、再翻面；AI 只負責幫你挑錯，句子自己改。</p>
+      ${all.length ? `
+        <div class="term-stats">共 <b>${all.length}</b> 張・今天到期 <b>${due.length}</b> 張</div>
+        <div class="term-actions">
+          ${due.length ? `<button class="primary" id="terms-review">開始複習到期卡（${due.length}）</button>` : '<span class="muted">今天沒有到期的卡 👍</span>'}
+          <button id="terms-export">匯出 Markdown</button>
+        </div>` : '<p>還沒有名詞卡。練習時答錯，題目下方會請你抽一個關鍵字，存下來就會出現在這裡。</p>'}
+    </section>
+    ${all.map((c) => {
+      const pool = questionsForTerm(DATA.questions, c);
+      const st = formatReviewDue(c.reviewDue, now);
+      const src = (c.qids || []).map((id) => qById.get(id)).filter(Boolean);
+      return `<section class="card term-card" data-id="${c.id}">
+        <div class="row"><h3 style="margin:0">${esc(c.term)}</h3>
+          <span class="review-badge ${st?.isDue ? 'due' : ''}">${st ? esc(st.label) : '未排程'}・第 ${c.reviewStage || 0} 階段</span></div>
+        <textarea class="term-edit" rows="2" placeholder="用一句你自己的話說明它">${esc(c.mine || '')}</textarea>
+        <p class="term-warn"></p>
+        <div class="term-actions">
+          <button class="term-drill" ${pool.length ? '' : 'disabled'}>跨題練習：含此詞的題（${pool.length}）</button>
+          <button class="term-ai">📋 複製給 AI 檢查</button>
+          <button class="term-del">刪除</button>
+        </div>
+        <p class="muted term-msg"></p>
+        ${src.length ? `<details><summary class="muted">出處 ${src.length} 題</summary>${src.map((q) => `<p class="qn">${esc(q.question)}</p>`).join('')}</details>` : ''}
+      </section>`;
+    }).join('')}`;
+
+  view.querySelectorAll('.term-card').forEach((el) => {
+    const id = el.dataset.id;
+    const card = () => store.terms[id];
+    const firstQ = () => qById.get((card().qids || [])[0]) || null;
+    el.querySelector('.term-edit').oninput = (e) => {
+      const c = card();
+      c.mine = e.target.value;
+      c.updatedAt = Date.now(); // 合併以 updatedAt 判斷句子新舊
+      save();
+      el.querySelector('.term-warn').innerHTML = copyWarnHtml(c.mine, firstQ());
+    };
+    el.querySelector('.term-drill').onclick = () => runPractice(shuffle(questionsForTerm(DATA.questions, card())));
+    el.querySelector('.term-ai').onclick = () => copyTermPrompt(card(), firstQ(), el.querySelector('.term-msg'));
+    const del = el.querySelector('.term-del');
+    del.onclick = () => {
+      if (!del.dataset.armed) { del.dataset.armed = '1'; del.textContent = '確定刪除？再按一次'; return; }
+      deleteTerm(store.terms, id);
+      save();
+      termsView();
+    };
+  });
+  if ($('#terms-review')) $('#terms-review').onclick = () => termReview(due);
+  if ($('#terms-export')) $('#terms-export').onclick = () => download('ipas-terms.md', termsToMarkdown(store.terms, DATA.questions), 'text/markdown');
+}
+
+// 名詞卡複習:只看名詞 → 先自己說/寫出來 → 翻面對照 → 自評記得/忘了(排下一次)
+function termReview(queue) {
+  setNav('terms');
+  let i = 0, remembered = 0;
+  const show = () => {
+    if (i >= queue.length) {
+      view.innerHTML = `<section class="card"><h2>名詞卡複習完成</h2>
+        <p>${queue.length} 張裡記得 <b>${remembered}</b> 張。忘了的明天會再出現。</p>
+        <button class="primary" id="tr-back">回名詞卡</button></section>`;
+      $('#tr-back').onclick = termsView;
+      return;
+    }
+    const c = store.terms[queue[i].id];
+    if (!isLiveTerm(c)) { i++; show(); return; }
+    view.innerHTML = `<section class="card">
+      <div class="row"><span class="muted">${i + 1} / ${queue.length}</span><span class="muted">名詞卡複習</span></div>
+      <h2 class="term-front">${esc(c.term)}</h2>
+      <textarea id="tr-recall" rows="2" placeholder="先別翻面：用一句話說出它是什麼（寫在這裡只是幫你想，不會存）"></textarea>
+      <button class="primary" id="tr-flip">翻面</button>
+      <div id="tr-back-side"></div>
+    </section>`;
+    $('#tr-flip').onclick = () => {
+      $('#tr-flip').remove();
+      $('#tr-back-side').innerHTML = `
+        <p class="exp"><b>你當初寫的：</b>${c.mine ? esc(c.mine) : '<span class="muted">（還沒寫句子，到名詞卡頁補上）</span>'}</p>
+        <div class="term-actions">
+          <button class="primary" id="tr-yes">記得 ✓</button>
+          <button id="tr-no">忘了 / 說不清楚</button>
+        </div>`;
+      const grade = (ok) => {
+        reviewTerm(c, ok);
+        if (ok) remembered++;
+        save();
+        i++; show();
+      };
+      $('#tr-yes').onclick = () => grade(true);
+      $('#tr-no').onclick = () => grade(false);
+    };
+  };
+  show();
+}
+
+const ROUTES = { home, guide, mock: mockSetup, wrong: wrongbook, notes, terms: termsView, stats, settings };
 
 // ---- boot ----
 async function boot() {
