@@ -202,12 +202,13 @@ export function toMarkdown(questions, progress, title = 'iPAS 筆記') {
 }
 
 // 整理成 Notion Toggle Active Recall 遮答格式（含 題目｜答案｜考生回答｜AI 檢查標準格式）
-export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與複習筆記') {
+export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與複習筆記', terms = {}) {
   const lines = [`# ${title}`, ''];
   let n = 0;
   for (const q of questions) {
     const p = (progress && progress[q.id]) || {};
-    if (!p.starred && !p.note && !p.studentAnswer && (p.wrong || 0) === 0) continue;
+    const qTerms = termsForQuestion(terms, q.id);
+    if (!p.starred && !p.note && !p.studentAnswer && !qTerms.length && (p.wrong || 0) === 0) continue;
     n++;
     const kw = q.topic || q.chapter || q.subject;
     lines.push(`### ${n}. 【${q.level}・${kw}】${q.question}`);
@@ -227,6 +228,10 @@ export function toNotionMarkdown(questions, progress, title = 'iPAS 關鍵字與
       lines.push('');
       lines.push('> **【AI 檢查考生回答與考點解析】**：');
       q.explanation.split('\n').forEach((l) => lines.push(`> ${l}`));
+    }
+    for (const c of qTerms) {
+      lines.push('');
+      lines.push(`> **🔑 我的名詞卡**：${c.term} → ${c.mine || '（還沒寫）'}`);
     }
     if (p.note) {
       lines.push('');
@@ -664,6 +669,9 @@ export function isSystemManagedBlock(b, q = {}) {
 // 智慧深度合併兩份進度（唯一作答事件去重 + 自洽統計快照 + 獨立屬性時間戳 + 重設版本隔離）
 export function mergeStores(target, incoming, todayStr = new Date().toISOString().slice(0, 10)) {
   if (!incoming || !incoming.q) return target;
+  // 舊版(本機分支)把名詞卡存在 q[qid].keywordCard;先搬進 terms,否則下面重建每題物件時會被丟掉
+  target = migrateKeywordCards(structuredClone(target));
+  incoming = migrateKeywordCards(structuredClone(incoming));
   const out = structuredClone(target);
   out.q ||= {};
   out.cards ||= {};
@@ -1149,12 +1157,13 @@ export function termsForQuestion(terms = {}, qid) {
   return Object.values(terms).filter((c) => isLiveTerm(c) && (c.qids || []).includes(qid));
 }
 
-// 跨題練習的出題池:題幹/選項/topic 含這個名詞的題目 + 當初抽出這張卡的題目(不管章節,刻意交錯)
+// 跨題練習的出題池:題幹/選項/topic/章節/詳解含這個名詞的題目 + 當初抽出這張卡的題目(不管章節,刻意交錯)。
+// 含詳解:有些題考的是這個概念、題幹卻沒寫出名詞,這種題最能測出是不是真的懂(詳解在作答前不會顯示)。
 export function questionsForTerm(questions = [], card) {
   const kw = normTerm(card.term);
   const linked = new Set(card.qids || []);
   return questions.filter((q) => linked.has(q.id)
-    || `${q.question} ${(q.options || []).join(' ')} ${q.topic || ''}`.toLowerCase().includes(kw));
+    || `${q.question} ${(q.options || []).join(' ')} ${q.topic || ''} ${q.chapter || ''} ${q.explanation || ''}`.toLowerCase().includes(kw));
 }
 
 // 合併兩端名詞卡:內容(名詞/句子/刪除)比 updatedAt、複習排程比 reviewUpdatedAt,兩者分開判斷;
@@ -1271,4 +1280,52 @@ export function termsToMarkdown(terms = {}, questions = []) {
     }
   }
   return out.join('\n');
+}
+
+// 舊版資料遷移:q[qid].keywordCard = { keyword, userSentence, updatedAt } → store.terms(冪等)
+export function migrateKeywordCards(s) {
+  if (!s || !s.q) return s;
+  s.terms ||= {};
+  for (const [qid, p] of Object.entries(s.q)) {
+    const kc = p && p.keywordCard;
+    if (!kc) continue;
+    if (kc.keyword && String(kc.keyword).trim()) {
+      const t = kc.updatedAt || p.noteUpdatedAt || p.updatedAt || 1;
+      const id = termId(kc.keyword);
+      const prev = s.terms[id];
+      // 已有較新的同名卡(含刪除墓碑)就只掛題目,不覆寫句子
+      if (prev && (prev.updatedAt || 0) >= t) {
+        if (!prev.deleted && !(prev.qids || []).includes(qid)) prev.qids = [...(prev.qids || []), qid].sort();
+      } else {
+        upsertTerm(s.terms, { term: kc.keyword, mine: kc.userSentence || '', qid }, t);
+      }
+    }
+    delete p.keywordCard;
+  }
+  return s;
+}
+
+// 題幹 HTML:轉義後標出決定性字眼(純函數,含 XSS 防護測試)
+export function escHtml(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+export function highlightDecisive(stem) {
+  const text = String(stem ?? '');
+  let out = '', at = 0;
+  for (const h of findDecisiveWords(text)) {
+    out += escHtml(text.slice(at, h.at)) + `<mark class="dw">${escHtml(h.word)}</mark>`;
+    at = h.at + h.word.length;
+  }
+  return out + escHtml(text.slice(at));
+}
+
+// 本機即時檢查:抽的名詞跟這題有沒有關係(打錯字、抽錯詞會立刻看到)。
+// 只檢查「名詞切不切題」,不評句子好壞——句子對不對要對照詳解或請 AI 挑錯。
+export function termRelevance(q, term) {
+  const kw = normTerm(term);
+  if (!kw || !q) return 'empty';
+  const core = `${q.topic || ''} ${q.chapter || ''} ${q.explanation || ''} ${(q.options || [])[q.answer] || ''}`.toLowerCase();
+  if (core.includes(kw)) return 'core';
+  const rest = `${q.question || ''} ${(q.options || []).join(' ')}`.toLowerCase();
+  return rest.includes(kw) ? 'mentioned' : 'absent';
 }

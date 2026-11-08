@@ -675,3 +675,49 @@ import { normTerm, termId, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsFo
   assert.ok(pr.includes('不要直接給我') && pr.includes('先查資料再生成') && pr.includes('正解:(B) b'));
   console.log('PASS (名詞卡:建卡/去重、複習排程、跨題練習池、合併與墓碑、照抄偵測、決定性字眼)');
 }
+
+// ---- 名詞卡第二輪(合併本機 feat/keyword-card 分支的長處) ----
+import { migrateKeywordCards, highlightDecisive, termRelevance, toNotionMarkdown as toNotionMdT, questionsForTerm as qft2, termId as termId2 } from './core.js';
+{
+  // 舊版 q[qid].keywordCard → terms;冪等;同步合併時另一端的舊格式卡不可遺失
+  const legacy = { q: { q1: { attempts: 1, updatedAt: 50, keywordCard: { keyword: 'RAG', userSentence: '先查再生成', updatedAt: 100 } }, q2: { keywordCard: { keyword: '', userSentence: 'x' } } } };
+  const m1 = migrateKeywordCards(structuredClone(legacy));
+  const id = termId2('RAG');
+  assert.equal(m1.terms[id].mine, '先查再生成');
+  assert.deepEqual(m1.terms[id].qids, ['q1']);
+  assert.equal(m1.q.q1.keywordCard, undefined, '搬完要移除舊欄位');
+  assert.equal(m1.q.q2.keywordCard, undefined, '空關鍵字的舊卡直接丟掉');
+  assert.deepEqual(migrateKeywordCards(structuredClone(m1)).terms, m1.terms, '遷移冪等');
+  const merged = mergeStoresT({ q: {}, terms: {}, updatedAt: 1 }, legacy);
+  assert.equal(merged.terms[id]?.mine, '先查再生成', 'mergeStores 要先遷移另一端的舊格式名詞卡');
+  // 已有較新的同名卡:只掛題目,不覆寫句子;墓碑不被舊卡復活
+  const newer = { q: { q9: { keywordCard: { keyword: 'rag', userSentence: '舊', updatedAt: 10 } } }, terms: { [id]: { id, term: 'RAG', mine: '新', qids: ['q1'], updatedAt: 999 } } };
+  const m2 = migrateKeywordCards(newer);
+  assert.equal(m2.terms[id].mine, '新');
+  assert.deepEqual(m2.terms[id].qids, ['q1', 'q9']);
+  const tomb = migrateKeywordCards({ q: { q9: { keywordCard: { keyword: 'RAG', userSentence: '舊', updatedAt: 10 } } }, terms: { [id]: { id, deleted: true, updatedAt: 999, qids: [] } } });
+  assert.equal(tomb.terms[id].deleted, true, '刪掉的卡不可被舊資料復活');
+
+  // 題幹高亮:轉義 + 標記
+  const h = highlightDecisive('<img src=x onerror=alert(1)> 下列何者最不適合?');
+  assert.ok(!h.includes('<img') && h.includes('&lt;img'), 'HTML 要轉義');
+  assert.ok(h.includes('<mark class="dw">最不適合</mark>'));
+  assert.equal(highlightDecisive(null), '');
+
+  // 名詞切題檢查
+  const rq = { question: '下列何者最能說明檢索增強生成?', options: ['降低幻覺', 'B', 'C', 'Transformer'], answer: 0, topic: 'RAG', explanation: '透過外部知識庫降低 LLM 幻覺' };
+  assert.equal(termRelevance(rq, 'rag'), 'core');
+  assert.equal(termRelevance(rq, 'Transformer'), 'mentioned');
+  assert.equal(termRelevance(rq, '量子退火'), 'absent');
+  assert.equal(termRelevance(rq, ' '), 'empty');
+
+  // 跨題練習池含詳解(考概念但題幹沒寫名詞的題)
+  assert.deepEqual(qft2([rq, { id: 'z', question: 'q', options: ['a'], explanation: '無關' }].map((q, i) => ({ id: 'x' + i, ...q })), { term: 'LLM', qids: [] }).map((q) => q.id), ['x0']);
+
+  // Notion 匯出帶上名詞卡;只有名詞卡的題也要匯出
+  const nq = [{ id: 'n1', level: '初級', subject: 'S', question: 'Q1', options: ['a', 'b'], answer: 0 }];
+  const md = toNotionMdT(nq, {}, 't', { [id]: { id, term: 'RAG', mine: '先查再生成', qids: ['n1'], updatedAt: 1 } });
+  assert.ok(md.includes('🔑 我的名詞卡**：RAG → 先查再生成'));
+  assert.ok(toNotionMdT(nq, {}, 't').includes('目前尚無'), '不傳 terms 時行為不變');
+  console.log('PASS (名詞卡第二輪:舊格式遷移/合併、高亮轉義、切題檢查、詳解入池、Notion 匯出)');
+}

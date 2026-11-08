@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -50,6 +50,7 @@ function load() {
     if (s && s.q) {
       s.cards ||= {};
       s.terms ||= {}; // 名詞卡(關鍵字 → 一句自己的話)
+      migrateKeywordCards(s); // 舊本機分支存在 q[qid].keywordCard 的卡搬進 terms
       // 安全遷移：將舊版留在 store.settings 的 Notion 金鑰轉移至本機 localStorage 並從 store 抹除
       if (s.settings?.notionToken) {
         if (!localStorage.getItem('ipas_notion_token')) localStorage.setItem('ipas_notion_token', s.settings.notionToken);
@@ -913,17 +914,8 @@ function home() {
 
 // ---- 名詞卡 / 決定性字眼 共用 ----
 const stemFirstOn = () => !!store.settings?.stemFirst;
-// 題幹標出決定性字眼(作答「後」才標:先讓考生自己圈,工具只負責對答案)
-function highlightStem(stem) {
-  const hits = findDecisiveWords(stem);
-  if (!hits.length) return esc(stem);
-  let out = '', at = 0;
-  for (const h of hits) {
-    out += esc(stem.slice(at, h.at)) + `<mark class="dw">${esc(h.word)}</mark>`;
-    at = h.at + h.word.length;
-  }
-  return out + esc(stem.slice(at));
-}
+// 題幹標出決定性字眼:作答「後」才標(先讓考生自己圈,工具只負責對答案);實作在 core.highlightDecisive
+const highlightStem = highlightDecisive;
 const liveTerms = () => Object.values(store.terms || {}).filter(isLiveTerm);
 function copyWarnHtml(mine, q) {
   if (!q || !mine) return '';
@@ -1156,12 +1148,18 @@ function runPractice(pool, opts = {}) {
     const d = drafts.get(i);
     if (d) { termIn.value = d.term; termMine.value = d.mine; $('#term-warn').innerHTML = copyWarnHtml(d.mine, q); }
     const keepDraft = () => drafts.set(i, { term: termIn.value, mine: termMine.value });
+    const REL_HINT = {
+      core: '✓ 這個詞是本題的考點（出現在詳解或正解裡）。',
+      mentioned: '這個詞出現在題目或選項，但不在詳解裡——確定它是你卡住的地方？',
+      absent: '⚠️ 這題和詳解都沒有這個詞。打錯字了？或你想到的是另一個相關名詞（那也可以，寫清楚它跟本題的關係）。',
+    };
     termIn.oninput = () => {
       keepDraft();
       const c = existingCard();
-      $('#term-exist').innerHTML = c
+      const rel = REL_HINT[termRelevance(q, termIn.value)] || '';
+      $('#term-exist').innerHTML = [rel && `<span>${rel}</span>`, c
         ? `已經有這張卡：「${esc(c.mine || '（還沒寫句子）')}」。儲存會把這題掛上去；下面留空就沿用原句，寫了就更新成新句子。`
-        : '';
+        : ''].filter(Boolean).join('<br>');
     };
     termMine.oninput = () => { keepDraft(); $('#term-warn').innerHTML = copyWarnHtml(termMine.value, q); };
     if (d?.term) termIn.oninput();
@@ -1271,7 +1269,7 @@ function runPractice(pool, opts = {}) {
       }
     };
     if ($('#notion-copy-btn')) $('#notion-copy-btn').onclick = async () => {
-      const text = toNotionMarkdown([q], { [q.id]: p });
+      const text = toNotionMarkdown([q], { [q.id]: p }, undefined, store.terms);
       try {
         await navigator.clipboard.writeText(text);
         $('#notion-single-msg').textContent = '✓ 已複製 Notion Toggle 格式，可直接貼入 Notion！';
@@ -2011,11 +2009,11 @@ function wrongbook() {
 
 function notes() {
   setNav('notes');
-  const items = DATA.questions.filter((q) => { const p = store.q[q.id]; return p && (p.note || p.studentAnswer || p.starred); });
+  const items = DATA.questions.filter((q) => { const p = store.q[q.id]; return (p && (p.note || p.studentAnswer || p.starred)) || termsForQuestion(store.terms, q.id).length; });
   view.innerHTML = `
     <section class="card">
       <h2>我的筆記</h2>
-      <p class="muted">有寫筆記、或加星 ⭐ 的題目都在這。支援一鍵匯出或同步至 Notion 資料庫進行 Active Recall 記憶！</p>
+      <p class="muted">有寫筆記、抽過名詞卡、或加星 ⭐ 的題目都在這。支援一鍵匯出或同步至 Notion 資料庫進行 Active Recall 記憶！</p>
       ${items.length
         ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
              <button id="exp-notes">匯出筆記（Markdown）</button>
@@ -2034,6 +2032,8 @@ function notes() {
             </span>
           </div>
           <p class="qn">${esc(q.question)}</p>
+          ${termsForQuestion(store.terms, q.id).map((c) => `<div class="term-linked">🔑 <b>${esc(c.term)}</b> → ${c.mine ? esc(c.mine) : '<span class="muted">（還沒寫句子）</span>'}
+            <button class="goto term-drill-n" data-tid="${c.id}">跨題練習（${questionsForTerm(DATA.questions, c).length}）</button></div>`).join('')}
           <textarea class="note-edit" data-id="${esc(q.id)}" rows="2" placeholder="寫下你的理解或記憶點…">${esc(p.note || '')}</textarea>
         </div>`;
       }).join('')}
@@ -2048,7 +2048,10 @@ function notes() {
     const btn = e.target.closest('.note-item')?.querySelector('.notion-btn');
     if (btn && !btn.disabled) btn.textContent = notionBtnLabel(p);
   }));
-  view.querySelectorAll('.goto').forEach((b) => (b.onclick = () => { const q = DATA.questions.find((x) => x.id === b.dataset.id); if (q) runPractice([q]); }));
+  view.querySelectorAll('.goto').forEach((b) => (b.onclick = () => {
+    if (b.dataset.tid) { const c = store.terms[b.dataset.tid]; if (c) runPractice(shuffle(questionsForTerm(DATA.questions, c))); return; }
+    const q = DATA.questions.find((x) => x.id === b.dataset.id); if (q) runPractice([q]);
+  }));
   view.querySelectorAll('.note-item .notion-btn').forEach((b) => (b.onclick = async () => {
     const q = DATA.questions.find((x) => x.id === b.dataset.id);
     if (!q) return;
@@ -2066,7 +2069,7 @@ function notes() {
   }));
   if (items.length) {
     $('#exp-notes').onclick = () => download('ipas-notes.md', toMarkdown(DATA.questions, store.q), 'text/markdown');
-    $('#exp-notion-md').onclick = () => download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q), 'text/markdown');
+    $('#exp-notion-md').onclick = () => download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q, undefined, store.terms), 'text/markdown');
     $('#notion-sync-notes').onclick = async () => {
       const btn = $('#notion-sync-notes');
       const msg = $('#notion-notes-msg');
@@ -2462,7 +2465,7 @@ function settings() {
     msg.textContent = notionBatchMsg(ok, targetQs.length, failed);
   };
   if ($('#exp-notion-all')) $('#exp-notion-all').onclick = () => {
-    download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q), 'text/markdown');
+    download('ipas-notion-recall.md', toNotionMarkdown(DATA.questions, store.q, undefined, store.terms), 'text/markdown');
   };
   $('#exp').onclick = () => download('ipas-progress.json', JSON.stringify(store, null, 2), 'application/json');
   $('#exp-md').onclick = () => download('ipas-notes.md', toMarkdown(DATA.questions, store.q), 'text/markdown');

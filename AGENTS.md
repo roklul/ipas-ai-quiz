@@ -162,6 +162,7 @@ python3 -m http.server 8000        # 本機開站(fetch 需要 http,不能 file:
 
 ## 禁區 / 注意
 
+- **市售書籍的掃描/OCR 講義不可 commit**(`docs/IPAS_書本講義/` 已列入 `.gitignore`):本 repo 公開,書是有版權的。曾有一次分支把整本講義 OCR(約 1.8 萬行)一起 commit 進去,推上去前才攔下。
 - **別 commit**:`worker/node_modules/`、`worker/.wrangler/`、任何金鑰私鑰(私鑰只放 `wrangler secret`)。
 - **改到被快取的檔**(index/app/core/questions/concepts/icon…)就把 `sw.js` 的 `CACHE` 版號 +1,否則使用者拿到舊版。
 - **答案以官方為準**:`answer` 取自官方公告試題答案,不要憑感覺改。`explanation` 是本站原創。
@@ -182,7 +183,7 @@ python3 -m http.server 8000        # 本機開站(fetch 需要 http,不能 file:
 - **模考計時**：以實際經過時間扣減、分頁隱藏時暫停，不可用回呼次數。
 - **Notion 跨網域 CORS**：`worker/src/index.js` 與 `server.mjs` 的 `Access-Control-Allow-Methods` 必須涵蓋 `core.js` 呼叫 Notion 用到的每種方法（含 **PATCH**）。曾漏放 PATCH：GitHub Pages 跨網域預檢被擋，批次同步 86 題全部只顯示「Failed to fetch」；「連線測試」只用 GET 照樣成功，localhost 同源也測不出來。`core.test.mjs` 有硬檢查。改了 Worker 要另外 `cd worker && npx wrangler deploy`，GitHub push 不會部署 Worker。
 - **Notion**：404 先確認資料庫可存取才重建頁面；`notionBlockIds` 未知時留 `undefined`（不是 `[]`）；舊頁面只刪有固定標記的系統區塊。批次同步必須回報失敗項目。
-- **名詞卡（`store.terms`）**：放在 store 頂層，**不要掛在 `store.q[qid]` 底下**——`mergeStores` 用固定欄位重建每題物件，題目底下的新欄位同步時會被靜默丟掉。卡片 id 由正規化名詞算出（`termId`），兩台裝置建立同一個詞同步後仍是同一張卡；合併時內容比 `updatedAt`、複習排程比 `reviewUpdatedAt`、`qids` 取聯集，刪除留墓碑（`deleted: true`）防止復活。卡片內容一律由考生自己寫，不要加「AI 自動產生名詞卡」——這個功能的目的就是提取練習。測試在 `core.test.mjs`「名詞卡」段（含 mergeStores 帶上 terms 的硬檢查）。
+- **名詞卡（`store.terms`）**：放在 store 頂層，**不要掛在 `store.q[qid]` 底下**——`mergeStores` 用固定欄位重建每題物件，題目底下的新欄位同步時會被靜默丟掉。卡片 id 由正規化名詞算出（`termId`），兩台裝置建立同一個詞同步後仍是同一張卡；合併時內容比 `updatedAt`、複習排程比 `reviewUpdatedAt`、`qids` 取聯集，刪除留墓碑（`deleted: true`）防止復活。舊格式 `q[qid].keywordCard`（曾在一個本機分支用過）由 `migrateKeywordCards` 在 `load()` 與 `mergeStores` 開頭搬進 `terms`，有負控制測試。卡片內容一律由考生自己寫，不要加「AI 自動產生名詞卡」——這個功能的目的就是提取練習。測試在 `core.test.mjs`「名詞卡」段（含 mergeStores 帶上 terms 的硬檢查）。
 - **決定性字眼**：清單在 `core.js` 的 `DECISIVE_WORDS`，比對長詞優先、不重疊。作答**後**才標，作答前只蓋住選項讓考生自己圈。加詞前先用題庫量覆蓋率，避免「錯誤」「正確」這類會誤中「錯誤率」「正確率」的短詞。
 - 改以上任一項，對應測試在 `core.test.mjs`「本輪審查補強」「練習出題(buildPracticeQueue)」與 `notion_sync.test.mjs` 案例 12–15。
 - **語法檢查**：`node --check app.js` 不會把 `.js` 當 ES module 解析，曾放過一段殘留的重複程式碼（整站白屏）。`core.test.mjs` 已內建 module 語法硬檢查；手動檢查請先複製成 `.mjs`。
