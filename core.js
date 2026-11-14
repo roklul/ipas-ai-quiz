@@ -1329,3 +1329,14 @@ export function termRelevance(q, term) {
   const rest = `${q.question || ''} ${(q.options || []).join(' ')}`.toLowerCase();
   return rest.includes(kw) ? 'mentioned' : 'absent';
 }
+
+// 依學習指引單元代碼（如 L111、L224）篩選題目；可選僅限 2026（115年）官方真題
+export function filterQuestionsByUnit(questions, unitCode, { only2026 = false } = {}) {
+  const prefix = String(unitCode || '').trim().toUpperCase();
+  if (!prefix) return [];
+  return (questions || []).filter((q) => {
+    if (!q.syllabusItem || !q.syllabusItem.toUpperCase().startsWith(prefix)) return false;
+    if (only2026 && !(q.round && q.round.startsWith('115年'))) return false;
+    return true;
+  });
+}

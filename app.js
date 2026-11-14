@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance, filterQuestionsByUnit } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -10,6 +10,7 @@ const view = $('#view');
 let DATA = { meta: {}, questions: [] };
 let CONCEPTS = [];
 let GUIDE_DATA = { categories: [], cards: [] };
+let SYLLABUS_UNITS = { units: [] };
 let EXAMINFO = null;
 let store = load();
 let pushTimer = null;
@@ -854,6 +855,7 @@ function home() {
   }
   if ($('#goto-concept-guide')) {
     $('#goto-concept-guide').onclick = () => {
+      guideSubMode = 'cards';
       guideActiveCat = '全部';
       guideSearchKw = (conceptGuideCard?.title || cc?.title || '').split(/[ (]/)[0];
       guide();
@@ -1240,6 +1242,7 @@ function runPractice(pool, opts = {}) {
 
     if ($('#jump-guide-card')) {
       $('#jump-guide-card').onclick = () => {
+        guideSubMode = 'cards';
         guideActiveCat = '全部';
         guideSearchKw = relatedCards[0].title.split(' ')[0];
         guide();
@@ -1384,6 +1387,9 @@ function runPractice(pool, opts = {}) {
   render();
 };
 
+let guideSubMode = 'units'; // 'units' | 'cards'
+let unitLevelFilter = '全部'; // '全部' | '初級' | '中級'
+let unitSearchKw = '';
 let guideActiveCat = '全部';
 let guideSearchKw = '';
 
@@ -1394,7 +1400,129 @@ function guide() {
     : ['全部', '數值預測任務', '分類判斷任務', '非監督學習', '模型評估與陷阱', '資料處理與特徵工程'];
   const allCards = GUIDE_DATA.cards || [];
 
+  const subTabsHtml = () => `
+    <div class="guide-subtabs">
+      <button class="guide-subtab ${guideSubMode === 'units' ? 'on' : ''}" data-sub="units">📚 單元對照演練（L111～L234 含 2026 真題）</button>
+      <button class="guide-subtab ${guideSubMode === 'cards' ? 'on' : ''}" data-sub="cards">🧠 考點速查心智卡（科目1弱點導航）</button>
+    </div>
+  `;
+
+  const bindSubTabs = () => {
+    view.querySelectorAll('.guide-subtab').forEach((btn) => {
+      btn.onclick = () => {
+        guideSubMode = btn.dataset.sub;
+        render();
+      };
+    });
+  };
+
+  const renderUnits = () => {
+    const allUnits = SYLLABUS_UNITS.units || [];
+    const kw = unitSearchKw.trim().toLowerCase();
+    const filteredUnits = allUnits.filter((u) => {
+      if (unitLevelFilter !== '全部' && u.level !== unitLevelFilter) return false;
+      if (!kw) return true;
+      const hay = `${u.code} ${u.level} ${u.subject} ${u.title} ${(u.items || []).join(' ')} ${(u.lessons || []).join(' ')}`.toLowerCase();
+      return hay.includes(kw);
+    });
+
+    const levelTabs = ['全部', '初級', '中級'].map((lv) => {
+      const cnt = lv === '全部' ? allUnits.length : allUnits.filter((u) => u.level === lv).length;
+      return `<button class="guide-cat-tab unit-lv-tab ${unitLevelFilter === lv ? 'on' : ''}" data-lv="${lv}">${lv} (${cnt})</button>`;
+    }).join('');
+
+    const unitsHtml = filteredUnits.map((u) => {
+      const unitPool = filterQuestionsByUnit(DATA.questions, u.code);
+      const y2026Pool = filterQuestionsByUnit(DATA.questions, u.code, { only2026: true });
+      const sum = practiceSummary(unitPool, store.q);
+      const lessonListHtml = (u.lessons || []).length
+        ? `<details class="unit-lessons"><summary>🎬 對應教材與影音單元（${u.lessons.length} 堂）</summary><ul>${u.lessons.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></details>`
+        : `<div class="unit-missing-note">⚠️ ${esc(u.missingNote || '本單元尚無對應影音清單，建議直接演練下方題庫與詳解。')}</div>`;
+
+      return `
+        <div class="guide-card unit-card">
+          <div class="guide-card-top">
+            <div>
+              <h3 class="guide-card-title"><span class="unit-code-badge">${esc(u.code)}</span> ${esc(u.title)}</h3>
+              <div class="unit-submeta">${esc(u.level)} ・ ${esc(u.subject)}</div>
+            </div>
+            <span class="guide-card-cat">${unitPool.length} 題（2026 真題 ${y2026Pool.length} 題）</span>
+          </div>
+          <div class="unit-items-chips">
+            ${(u.items || []).map((it) => `<span class="unit-item-chip">${esc(it)}</span>`).join('')}
+          </div>
+          <div class="unit-progress-line">
+            進度：新 <b>${sum.unseen}</b> · 錯 <b>${sum.wrong}</b> · 鞏固 <b>${sum.learning}</b> · 熟 <b>${sum.mastered}</b>
+          </div>
+          ${lessonListHtml}
+          <div class="guide-card-footer">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="guide-quiz-btn unit-drill-all" data-code="${esc(u.code)}" ${unitPool.length ? '' : 'disabled'}>
+                🎯 智慧演練本單元（${unitPool.length <= 25 ? `全 ${unitPool.length} 題` : '20 題'}）
+              </button>
+              ${y2026Pool.length ? `
+                <button class="guide-copy-btn unit-drill-2026" data-code="${esc(u.code)}" style="background:#fef3c7!important;border-color:#f59e0b!important;color:#92400e!important;font-weight:700">
+                  🔥 專練 2026 (115年) 真題（${y2026Pool.length} 題）
+                </button>` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    view.innerHTML = `
+      <section class="card guide-header">
+        <h2>官方學習指引單元對照練題（2026 / 115年適用）</h2>
+        ${subTabsHtml()}
+        <p class="muted" style="margin:6px 0 10px;font-size:14px">
+          依官方評鑑主題代碼（<code>L111</code>～<code>L234</code>）對照您的教材與影音課程，學完單元即可一鍵演練對應題庫與 2026 (115年) 最新真題。
+        </p>
+        <label style="margin:0 0 8px">
+          <input id="unit-kw-in" placeholder="搜尋單元代碼、考點或課程標題，例如：L224、RAG、歐盟、差分隱私..." value="${esc(unitSearchKw)}">
+        </label>
+        <div class="guide-tabs">${levelTabs}</div>
+      </section>
+      <div id="unit-list">${unitsHtml || '<section class="card"><p class="muted">沒有符合條件的單元。</p></section>'}</div>
+    `;
+
+    bindSubTabs();
+    const uIn = $('#unit-kw-in');
+    if (uIn) {
+      uIn.oninput = (e) => {
+        unitSearchKw = e.target.value;
+        render();
+        const el = $('#unit-kw-in');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      };
+    }
+    view.querySelectorAll('.unit-lv-tab').forEach((btn) => {
+      btn.onclick = () => { unitLevelFilter = btn.dataset.lv; render(); };
+    });
+    view.querySelectorAll('.unit-drill-all').forEach((btn) => {
+      btn.onclick = () => {
+        const code = btn.dataset.code;
+        const pool = filterQuestionsByUnit(DATA.questions, code);
+        if (!pool.length) return;
+        const count = pool.length <= 25 ? 0 : 20;
+        const { queue } = buildPracticeQueue(pool, store.q, { mode: 'smart', count });
+        runPractice(queue.length ? queue : shuffle(pool), { title: `${code} 單元演練` });
+      };
+    });
+    view.querySelectorAll('.unit-drill-2026').forEach((btn) => {
+      btn.onclick = () => {
+        const code = btn.dataset.code;
+        const pool = filterQuestionsByUnit(DATA.questions, code, { only2026: true });
+        if (!pool.length) return;
+        runPractice(shuffle(pool), { title: `${code} 2026 (115年) 真題演練` });
+      };
+    });
+  };
+
   const render = () => {
+    if (guideSubMode === 'units') {
+      renderUnits();
+      return;
+    }
     const kw = guideSearchKw.trim().toLowerCase();
     const filtered = allCards.filter((c) => {
       if (guideActiveCat !== '全部' && c.category !== guideActiveCat) return false;
@@ -1473,7 +1601,8 @@ function guide() {
     view.innerHTML = `
       <section class="card guide-header">
         <h2>初級考科一：人工智慧基礎概論 · 考點速查心智卡</h2>
-        <p class="muted" style="margin:4px 0 10px;font-size:14px">
+        ${subTabsHtml()}
+        <p class="muted" style="margin:6px 0 10px;font-size:14px">
           專治「看懂名詞卻不知用來做什麼、情境題選不出來」！每張卡片皆可一鍵直通歷屆真題測驗，驗收 Active Recall 主動回憶。
         </p>
         <label style="margin:0 0 8px">
@@ -1485,6 +1614,7 @@ function guide() {
       <div id="guide-list">${cardsHtml || '<section class="card"><p class="muted">沒有符合搜尋條件的考點心智卡。</p></section>'}</div>
     `;
 
+    bindSubTabs();
     // 綁定搜尋輸入
     const kwInput = $('#guide-kw-in');
     if (kwInput) {
@@ -1955,9 +2085,17 @@ function wrongbook() {
     view.querySelectorAll('.wr-goto-guide').forEach((btn) => {
       btn.onclick = () => {
         const th = btn.dataset.theme;
-        const code = th.split(' ')[0]; // e.g. L111, L113
-        guideActiveCat = '全部';
-        guideSearchKw = code;
+        const code = th.split(' ')[0]; // e.g. L111, L113, L22403
+        const hasCard = (GUIDE_DATA.cards || []).some((c) => `${c.syllabusItem || ''} ${c.title}`.toLowerCase().includes(code.toLowerCase()));
+        if (hasCard) {
+          guideSubMode = 'cards';
+          guideActiveCat = '全部';
+          guideSearchKw = code;
+        } else {
+          guideSubMode = 'units';
+          unitLevelFilter = '全部';
+          unitSearchKw = code.slice(0, 4);
+        }
         guide();
       };
     });
@@ -2667,6 +2805,7 @@ async function boot() {
   }
   try { CONCEPTS = ((await (await fetch('concepts.json')).json()).cards) || []; } catch { CONCEPTS = []; }
   try { GUIDE_DATA = await (await fetch('guide-cards.json')).json(); } catch { GUIDE_DATA = { categories: [], cards: [] }; }
+  try { SYLLABUS_UNITS = await (await fetch('syllabus-units.json')).json(); } catch { SYLLABUS_UNITS = { units: [] }; }
   try { EXAMINFO = await (await fetch('exam-dates.json')).json(); } catch { EXAMINFO = null; }
   if (DATA.meta?.title) $('#title').textContent = DATA.meta.title;
   if (DATA.meta?.note) { const n = $('#banner'); n.textContent = DATA.meta.note; n.hidden = false; }

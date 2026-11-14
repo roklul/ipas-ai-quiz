@@ -721,3 +721,19 @@ import { migrateKeywordCards, highlightDecisive, termRelevance, toNotionMarkdown
   assert.ok(toNotionMdT(nq, {}, 't').includes('目前尚無'), '不傳 terms 時行為不變');
   console.log('PASS (名詞卡第二輪:舊格式遷移/合併、高亮轉義、切題檢查、詳解入池、Notion 匯出)');
 }
+
+// ---- 學習指引單元代碼篩選 (filterQuestionsByUnit) ----
+import { filterQuestionsByUnit } from './core.js';
+{
+  const samplePool = [
+    { id: '1', syllabusItem: 'L11101 AI的定義', round: '115年第一次' },
+    { id: '2', syllabusItem: 'L11102 AI治理', round: '114年第四次' },
+    { id: '3', syllabusItem: 'L22403 RAG與偏見', round: '115年第一次' },
+    { id: '4', syllabusItem: 'L22401 機器學習', round: '學習指引' },
+  ];
+  assert.deepEqual(filterQuestionsByUnit(samplePool, 'L111').map((q) => q.id), ['1', '2']);
+  assert.deepEqual(filterQuestionsByUnit(samplePool, 'l111', { only2026: true }).map((q) => q.id), ['1']);
+  assert.deepEqual(filterQuestionsByUnit(samplePool, 'L224', { only2026: true }).map((q) => q.id), ['3']);
+  assert.deepEqual(filterQuestionsByUnit(samplePool, ''), []);
+  console.log('PASS (學習指引單元代碼篩選 filterQuestionsByUnit)');
+}
