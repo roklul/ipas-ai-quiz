@@ -722,18 +722,22 @@ import { migrateKeywordCards, highlightDecisive, termRelevance, toNotionMarkdown
   console.log('PASS (名詞卡第二輪:舊格式遷移/合併、高亮轉義、切題檢查、詳解入池、Notion 匯出)');
 }
 
-// ---- 學習指引單元代碼篩選 (filterQuestionsByUnit) ----
-import { filterQuestionsByUnit } from './core.js';
+// ---- 學習指引單元代碼篩選 (filterQuestionsByUnit & matchQuestionsForCard) ----
+import { filterQuestionsByUnit, matchQuestionsForCard } from './core.js';
 {
   const samplePool = [
-    { id: '1', syllabusItem: 'L11101 AI的定義', round: '115年第一次' },
-    { id: '2', syllabusItem: 'L11102 AI治理', round: '114年第四次' },
-    { id: '3', syllabusItem: 'L22403 RAG與偏見', round: '115年第一次' },
-    { id: '4', syllabusItem: 'L22401 機器學習', round: '學習指引' },
+    { id: '1', level: '初級', syllabusItem: 'L11101 AI的定義', round: '115年第一次', question: 'RAG是什麼', options: ['a'], explanation: '' },
+    { id: '2', level: '初級', syllabusItem: 'L11102 AI治理', round: '114年第四次', question: '無關', options: ['a'], explanation: '' },
+    { id: '3', level: '中級', syllabusItem: 'L22403 RAG與偏見', round: '115年第一次', question: 'RAG與偏見', options: ['a'], explanation: '' },
+    { id: '4', level: '中級', syllabusItem: 'L22401 機器學習', round: '學習指引', question: '無關', options: ['a'], explanation: '' },
   ];
   assert.deepEqual(filterQuestionsByUnit(samplePool, 'L111').map((q) => q.id), ['1', '2']);
   assert.deepEqual(filterQuestionsByUnit(samplePool, 'l111', { only2026: true }).map((q) => q.id), ['1']);
   assert.deepEqual(filterQuestionsByUnit(samplePool, 'L224', { only2026: true }).map((q) => q.id), ['3']);
   assert.deepEqual(filterQuestionsByUnit(samplePool, ''), []);
-  console.log('PASS (學習指引單元代碼篩選 filterQuestionsByUnit)');
+  assert.deepEqual(matchQuestionsForCard(samplePool, { keywords: ['RAG'] }).map((q) => q.id), ['1'], '預設只篩初級');
+  assert.deepEqual(matchQuestionsForCard(samplePool, { level: '全部', keywords: ['RAG'] }).map((q) => q.id), ['1', '3'], 'level=全部時跨級別匹配');
+  const mdCard = cardToNotionMarkdown({ title: 'RAG', category: '生成式AI', function: '開卷考試', trap: '舊文件', practice: '版本控管', scenario: '客服問答', think: '為何不微調？', keywords: ['RAG'] });
+  assert.ok(mdCard.includes('實務解法與防線') && mdCard.includes('思考提問'));
+  console.log('PASS (學習指引單元與心智卡匹配 filterQuestionsByUnit / matchQuestionsForCard)');
 }

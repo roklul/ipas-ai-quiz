@@ -456,19 +456,25 @@ export function nextExam(exams, todayStr, level = null) {
 
 // 考點心智卡轉換為 Notion Markdown 格式
 export function cardToNotionMarkdown(card) {
-  return [
+  const lines = [
     `# 📌 [考點心智卡] ${card.title}`,
     `> **類別**：${card.category}`,
     `> **核心概念**：${card.subtitle || ''}`,
     '',
-    `### 🔹 核心功能`,
+    `### 🔹 懂觀念（核心功能）`,
     card.function,
     '',
-    `### 🔸 考題情境`,
-    card.scenario,
-    '',
-    `### ⚠️ 陷阱提醒`,
+    `### ⚠️ 陷阱與出錯原因`,
     card.trap,
+  ];
+  if (card.practice) {
+    lines.push('', `### 🛠️ 實務解法與防線`, card.practice);
+  }
+  lines.push('', `### 🔸 考題情境與應用`, card.scenario);
+  if (card.think) {
+    lines.push('', `### 💭 思考提問`, card.think);
+  }
+  lines.push(
     '',
     '<details>',
     `<summary>▶️ 關鍵字清單</summary>`,
@@ -476,7 +482,8 @@ export function cardToNotionMarkdown(card) {
     (card.keywords || []).map((k) => `- ${k}`).join('\n'),
     '',
     '</details>',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 // 艾賓浩斯遺忘曲線間隔（天數）：1天、3天、7天、14天、30天
@@ -1338,5 +1345,17 @@ export function filterQuestionsByUnit(questions, unitCode, { only2026 = false } 
     if (!q.syllabusItem || !q.syllabusItem.toUpperCase().startsWith(prefix)) return false;
     if (only2026 && !(q.round && q.round.startsWith('115年'))) return false;
     return true;
+  });
+}
+
+// 依考點心智卡的關鍵字與級別篩選匹配考題（預設初級；card.level === '全部' 則跨級別全收）
+export function matchQuestionsForCard(questions, card) {
+  if (!card || !(card.keywords || []).length) return [];
+  const targetLevel = card.level || '初級';
+  const kws = card.keywords.map((k) => k.toLowerCase());
+  return (questions || []).filter((q) => {
+    if (targetLevel !== '全部' && q.level !== targetLevel) return false;
+    const text = `${q.question} ${q.options.join(' ')} ${q.explanation || ''} ${q.topic || ''}`.toLowerCase();
+    return kws.some((k) => text.includes(k));
   });
 }

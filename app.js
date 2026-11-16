@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance, filterQuestionsByUnit } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance, filterQuestionsByUnit, matchQuestionsForCard } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -1527,7 +1527,7 @@ function guide() {
     const filtered = allCards.filter((c) => {
       if (guideActiveCat !== '全部' && c.category !== guideActiveCat) return false;
       if (!kw) return true;
-      const haystack = `${c.title} ${c.subtitle || ''} ${c.chapter || ''} ${c.syllabusItem || ''} ${c.function} ${c.scenario} ${c.trap} ${(c.keywords || []).join(' ')}`.toLowerCase();
+      const haystack = `${c.title} ${c.subtitle || ''} ${c.chapter || ''} ${c.syllabusItem || ''} ${c.function} ${c.practice || ''} ${c.think || ''} ${c.scenario} ${c.trap} ${(c.keywords || []).join(' ')}`.toLowerCase();
       return haystack.includes(kw);
     });
 
@@ -1550,12 +1550,7 @@ function guide() {
     ` : '';
 
     const cardsHtml = filtered.map((card) => {
-      // 找出初級科目1匹配的真題數量
-      const matchedQs = DATA.questions.filter((q) => {
-        if (q.level !== '初級') return false;
-        const text = `${q.question} ${q.options.join(' ')} ${q.explanation || ''} ${q.topic || ''}`.toLowerCase();
-        return (card.keywords || []).some((k) => text.includes(k.toLowerCase()));
-      });
+      const matchedQs = matchQuestionsForCard(DATA.questions, card);
       const qCount = matchedQs.length;
 
       const cs = store.cards?.[card.id];
@@ -1572,7 +1567,7 @@ function guide() {
           <div class="guide-card-top">
             <div>
               <h3 class="guide-card-title">${esc(card.title)}</h3>
-              ${card.syllabusItem ? `<div style="font-size:12px;color:var(--c-accent);font-weight:600;margin-top:2px">📍 評鑑範圍：${esc(card.chapter || '')} ▸ ${esc(card.syllabusItem)}</div>` : ''}
+              ${card.syllabusItem ? `<div style="font-size:12px;color:var(--c-accent);font-weight:600;margin-top:2px">📍 評鑑範圍：${card.level === '全部' ? '初級・中級通用 ▸ ' : ''}${esc(card.chapter || '')} ▸ ${esc(card.syllabusItem)}</div>` : ''}
             </div>
             <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
               <span class="guide-card-cat">${esc(card.category)}</span>
@@ -1581,13 +1576,20 @@ function guide() {
           </div>
           ${card.subtitle ? `<div class="guide-card-sub">${esc(card.subtitle)}</div>` : ''}
           <div class="guide-card-body">
-            <div class="guide-item fun"><b>🔹 核心功能</b> ${esc(card.function)}</div>
-            <div class="guide-item sce"><b>🔸 考題情境</b> ${esc(card.scenario)}</div>
-            <div class="guide-item trp"><b>⚠️ 陷阱提醒</b> ${esc(card.trap)}</div>
+            <div class="guide-item fun"><b>🔹 懂觀念</b> ${esc(card.function)}</div>
+            <div class="guide-item trp"><b>⚠️ 避陷阱</b> ${esc(card.trap)}</div>
+            ${card.practice ? `<div class="guide-item prc"><b>🛠️ 教實務</b> ${esc(card.practice)}</div>` : ''}
+            <div class="guide-item sce"><b>🔸 做應用</b> ${esc(card.scenario)}</div>
+            ${card.think ? `
+              <details class="guide-think">
+                <summary>💭 思考一下（點開先自己想，再按下方測驗驗證）</summary>
+                <p style="margin:6px 0">${esc(card.think)}</p>
+                <textarea rows="2" placeholder="先用自己的話想一想、寫下來，再去刷題驗證…"></textarea>
+              </details>` : ''}
           </div>
           <div class="guide-card-footer">
             <button class="guide-quiz-btn" data-cid="${esc(card.id)}">
-              🎯 實戰測驗此觀念 ${qCount ? `(${qCount} 題)` : ''}
+              🎯 做測試：實戰演練此觀念 ${qCount ? `(${qCount} 題)` : ''}
             </button>
             <div>
               <button class="guide-copy-btn" data-cid="${esc(card.id)}">📋 複製心智卡</button>
@@ -1600,10 +1602,10 @@ function guide() {
 
     view.innerHTML = `
       <section class="card guide-header">
-        <h2>初級考科一：人工智慧基礎概論 · 考點速查心智卡</h2>
+        <h2>考點速查心智卡（懂觀念 → 避陷阱 → 教實務 → 做測試）</h2>
         ${subTabsHtml()}
         <p class="muted" style="margin:6px 0 10px;font-size:14px">
-          專治「看懂名詞卻不知用來做什麼、情境題選不出來」！每張卡片皆可一鍵直通歷屆真題測驗，驗收 Active Recall 主動回憶。
+          先看懂名詞與出錯原因、學會實務防線與思考提問，再一鍵直通歷屆與 2026 真題測驗！
         </p>
         <label style="margin:0 0 8px">
           <input id="guide-kw-in" placeholder="搜尋專有名詞、演算法或指標，例如：迴歸、AUC、過擬合、混淆矩陣..." value="${esc(guideSearchKw)}">
@@ -1662,15 +1664,11 @@ function guide() {
         const cid = btn.dataset.cid;
         const card = allCards.find((c) => c.id === cid);
         if (!card) return;
-        const matchedQs = DATA.questions.filter((q) => {
-          if (q.level !== '初級') return false;
-          const text = `${q.question} ${q.options.join(' ')} ${q.explanation || ''} ${q.topic || ''}`.toLowerCase();
-          return (card.keywords || []).some((k) => text.includes(k.toLowerCase()));
-        });
+        const matchedQs = matchQuestionsForCard(DATA.questions, card);
         if (matchedQs.length) {
-          runPractice(shuffle(matchedQs));
+          runPractice(shuffle(matchedQs), { title: `${card.title.split('(')[0].trim()} 實戰測驗` });
         } else {
-          alert('目前題庫中暫無完全匹配此關鍵字的初級題目');
+          alert('目前題庫中暫無完全匹配此關鍵字的題目');
         }
       };
     });
