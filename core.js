@@ -1359,3 +1359,55 @@ export function matchQuestionsForCard(questions, card) {
     return kws.some((k) => text.includes(k));
   });
 }
+
+// 打包錯題、弱點單元與自製名詞卡，產生給 AI（Claude / ChatGPT / Gemini）診斷盲點與撰寫 ELI5 講義的 Prompt
+export function buildWrongDiagnosisPrompt(wrongQuestions, progress = {}, terms = {}, { levelLabel = '全部', maxQuestions = 20 } = {}) {
+  const qs = (wrongQuestions || []).slice(0, maxQuestions);
+  const liveTerms = Object.values(terms || {}).filter(isLiveTerm);
+  if (!qs.length && !liveTerms.length) {
+    return '目前沒有錯題與名詞卡可分析。請先進行練習並記錄錯題或名詞卡！';
+  }
+
+  // 統計弱點單元分布
+  const themeCounts = {};
+  for (const q of wrongQuestions || []) {
+    const k = q.syllabusItem || q.chapter || q.subject || '未分類';
+    themeCounts[k] = (themeCounts[k] || 0) + 1;
+  }
+  const topThemes = Object.entries(themeCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([k, n]) => `- ${k}：${n} 題`);
+
+  const qLines = qs.map((q, idx) => {
+    const p = (progress && progress[q.id]) || {};
+    const ans = `${'ABCD'[q.answer]}. ${(q.options || [])[q.answer] || ''}`;
+    const extra = [
+      p.studentAnswer ? `我的當時思路：${p.studentAnswer}` : '',
+      p.note ? `我的筆記：${p.note}` : '',
+    ].filter(Boolean).join('｜');
+    return `${idx + 1}. [${q.syllabusItem || q.chapter || q.subject}] ${q.question}\n   正解：${ans}${extra ? `\n   ${extra}` : ''}`;
+  });
+
+  const termLines = liveTerms.slice(0, 30).map((t) => `- **${t.term}**：${t.mine || '（尚未寫解釋）'}`);
+
+  return [
+    `你是一位擅長「講人話（ELI5）」、用生活比喻（例如開餐廳、開書店、看醫生）教純文組考生考過 iPAS AI 應用規劃師的教練。`,
+    `以下是我目前（範圍：${levelLabel}）反覆做錯的題目與自製名詞卡，請幫我做三件事：`,
+    `1. **盲點診斷**：分析我一直錯在哪些共同概念？是「概念混淆」還是「讀題漏看決定性字眼（最適合／不屬於／首要）」？`,
+    `2. **撰寫個人化弱點講義**：針對我最弱的前幾個考點，每個都用「① 生活比喻（講人話）→ ② 容易搞混的相似詞對比 → ③ 考場看到什麼字眼該怎麼選」整理成可直接印出來複習的講義。`,
+    `3. **延伸情境測驗**：針對我最弱的單元，出 2 題類似 iPAS 真題風格的情境題（附解答與解析）讓我立刻驗收。`,
+    '',
+    ...(topThemes.length ? ['## 最常錯的考點排行', ...topThemes, ''] : []),
+    ...(qLines.length ? [`## 錯題明細（列出 ${qLines.length} / ${(wrongQuestions || []).length} 題）`, ...qLines, ''] : []),
+    ...(termLines.length ? [`## 我抽出的名詞卡（${termLines.length} 張）`, ...termLines] : []),
+  ].join('\n');
+}
+
+// 梯度下降單步模擬：目標函數 L(w) = (w - 3)^2 + 1，導數 dL/dw = 2*(w - 3)
+export function gdStep(w, lr) {
+  const grad = 2 * (w - 3);
+  const nextW = w - lr * grad;
+  const loss = (nextW - 3) ** 2 + 1;
+  return { nextW, loss, grad };
+}

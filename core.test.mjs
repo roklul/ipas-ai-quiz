@@ -741,3 +741,26 @@ import { filterQuestionsByUnit, matchQuestionsForCard } from './core.js';
   assert.ok(mdCard.includes('實務解法與防線') && mdCard.includes('思考提問'));
   console.log('PASS (學習指引單元與心智卡匹配 filterQuestionsByUnit / matchQuestionsForCard)');
 }
+
+// ---- AI 弱點診斷 Prompt 與梯度下降模擬 (buildWrongDiagnosisPrompt / gdStep) ----
+import { buildWrongDiagnosisPrompt, gdStep } from './core.js';
+{
+  const wqs = [
+    { id: 'w1', syllabusItem: 'L11301 機器學習基本原理', question: 'KNN 與 K-means 差異？', options: ['A', 'B'], answer: 0 },
+  ];
+  const prompt = buildWrongDiagnosisPrompt(wqs, { w1: { studentAnswer: '我一直搞混' } }, { rag: { id: 'rag', term: 'RAG', mine: '開卷考試', updatedAt: 1 } }, { levelLabel: '初級' });
+  assert.ok(prompt.includes('講人話（ELI5）'), 'Prompt 應要求講人話');
+  assert.ok(prompt.includes('L11301 機器學習基本原理'), '應統計弱點考點');
+  assert.ok(prompt.includes('KNN 與 K-means 差異？'), '應帶出錯題');
+  assert.ok(prompt.includes('我一直搞混'), '應帶出考生思路');
+  assert.ok(prompt.includes('**RAG**：開卷考試'), '應帶出名詞卡');
+  assert.ok(buildWrongDiagnosisPrompt([], {}, {}).includes('目前沒有錯題'), '空狀態有友善提示');
+
+  // 梯度下降收斂 vs 發散
+  const sGood = gdStep(-2, 0.25); // grad = -10, nextW = -2 - 0.25*(-10) = 0.5
+  assert.equal(sGood.nextW, 0.5);
+  assert.ok(sGood.loss < (-2 - 3) ** 2 + 1, '合理學習率應使 Loss 下降');
+  const sDiv = gdStep(-2, 1.1); // grad = -10, nextW = 9 (距離 3 更遠: |9-3|=6 > |-2-3|=5)
+  assert.ok(Math.abs(sDiv.nextW - 3) > 5, '過大學習率應發散');
+  console.log('PASS (AI 弱點診斷 Prompt 與梯度下降模擬 buildWrongDiagnosisPrompt / gdStep)');
+}

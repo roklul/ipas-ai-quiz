@@ -1,4 +1,4 @@
-import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance, filterQuestionsByUnit, matchQuestionsForCard } from './core.js';
+import { nextBox, isMastered, practiceSummary, practiceSummaryBy, buildPracticeQueue, scoreExam, progressStats, wrongQuestionIds, toMarkdown, toNotionMarkdown, buildNotionPagePayload, cardToNotionMarkdown, calcNextReview, formatReviewDue, reviewPriority, guessLevel, nextExam, MASTER_BOX, parseExplanationOptions, diagnoseStudentAnswer, mergeStores, ensureQuestionLogs, syncQuestionToNotion as coreSyncQuestionToNotion, upsertTerm, deleteTerm, reviewTerm, dueTerms, termsForQuestion, questionsForTerm, isLiveTerm, termId, longestCopy, COPY_WARN_LEN, findDecisiveWords, buildTermCheckPrompt, termsToMarkdown, migrateKeywordCards, highlightDecisive, termRelevance, filterQuestionsByUnit, matchQuestionsForCard, buildWrongDiagnosisPrompt, gdStep } from './core.js';
 
 const STORE_KEY = 'ipas_quiz_progress';
 // 部署 Cloudflare Worker 後填入，例如 'https://ipas-quiz-sync.你的帳號.workers.dev'。留空=只用本機。
@@ -1403,7 +1403,8 @@ function guide() {
   const subTabsHtml = () => `
     <div class="guide-subtabs">
       <button class="guide-subtab ${guideSubMode === 'units' ? 'on' : ''}" data-sub="units">📚 單元對照演練（L111～L234 含 2026 真題）</button>
-      <button class="guide-subtab ${guideSubMode === 'cards' ? 'on' : ''}" data-sub="cards">🧠 考點速查心智卡（科目1弱點導航）</button>
+      <button class="guide-subtab ${guideSubMode === 'cards' ? 'on' : ''}" data-sub="cards">🧠 考點速查心智卡（五步實戰）</button>
+      <button class="guide-subtab ${guideSubMode === 'labs' ? 'on' : ''}" data-sub="labs">🎛️ 互動圖解實驗室（梯度下降 / KNN vs K-means）</button>
     </div>
   `;
 
@@ -1518,9 +1519,351 @@ function guide() {
     });
   };
 
+  const renderLabs = () => {
+    view.innerHTML = `
+      <section class="card guide-header">
+        <h2>演算法互動圖解實驗室（動手調參數，秒懂抽象考點）</h2>
+        ${subTabsHtml()}
+        <p class="muted" style="margin:6px 0 0;font-size:14px">
+          專治「公式看懂了，題目一變就不會」！直接拉滑桿、點畫布，親眼看懂學習率震盪與 KNN / K-means 的本質差異。
+        </p>
+      </section>
+
+      <section class="card">
+        <h3 style="margin:0 0 6px">⛰️ 實驗 1：梯度下降（Gradient Descent）與學習率（Learning Rate, η）</h3>
+        <p class="muted" style="font-size:13px;margin:0 0 10px">
+          <b>生活比喻</b>：把模型想像成「蒙眼下山找最低谷（Loss 最小）」，<b>學習率 η</b> 就是每一步跨多大的步伐。
+        </p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button class="guide-copy-btn gd-preset" data-lr="0.05">🐢 太小 (0.05)</button>
+          <button class="guide-copy-btn gd-preset" data-lr="0.25">✅ 剛好 (0.25)</button>
+          <button class="guide-copy-btn gd-preset" data-lr="0.95">⚡ 太大震盪 (0.95)</button>
+          <button class="guide-copy-btn gd-preset" data-lr="1.08">💥 過大發散 (1.08)</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;font-size:13px;margin:6px 0">
+          <span>學習率 η：<b id="gd-lr-val">0.25</b></span>
+          <input id="gd-lr" type="range" min="0.02" max="1.15" step="0.01" value="0.25" style="flex:1;margin:0">
+        </label>
+        <canvas id="gd-canvas" width="560" height="230" class="lab-canvas"></canvas>
+        <div id="gd-status" style="margin:8px 0;font-size:13px;line-height:1.5;padding:8px 10px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="primary" id="gd-step" style="margin:0">▶ 走一步</button>
+          <button class="guide-copy-btn" id="gd-auto">⏩ 自動連走 10 步</button>
+          <button class="guide-copy-btn" id="gd-reset">↺ 重設起點</button>
+          <button class="guide-quiz-btn" id="gd-drill" style="margin-left:auto">🎯 實戰演練梯度下降考題</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 style="margin:0 0 6px">🔵🔴 實驗 2：KNN（監督式分類）vs K-means（非監督式分群）</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px">
+          <button class="guide-cat-tab on" id="lab-mode-knn">KNN 分類（有標籤・找鄰居投票）</button>
+          <button class="guide-cat-tab" id="lab-mode-km">K-means 分群（無標籤・找中心抱團）</button>
+        </div>
+        <div id="knn-controls">
+          <p class="muted" style="font-size:13px;margin:0 0 8px">
+            <b>點擊畫布任意位置</b>放置「新資料點 ★」，調整 <b>K</b> 值看看鄰居怎麼投票（注意左下角的藍色離群點，K=1 時容易被誤導＝過擬合！）。
+          </p>
+          <label style="display:flex;align-items:center;gap:10px;font-size:13px;margin:4px 0 8px">
+            <span>鄰居數 K：<b id="knn-k-val">3</b></span>
+            <input id="knn-k" type="range" min="1" max="9" step="2" value="3" style="flex:1;margin:0">
+          </label>
+        </div>
+        <div id="km-controls" hidden>
+          <p class="muted" style="font-size:13px;margin:0 0 8px">
+            沒有標準答案（全部都是黑點）！選擇群數 <b>K</b>，按「執行一步」觀察：<b>① 點歸最近質心 → ② 質心移到該群中心</b>。
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+            <span style="font-size:13px">群數 K：</span>
+            <select id="km-k" style="width:auto;margin:0;padding:4px 8px">
+              <option value="2">K = 2</option>
+              <option value="3" selected>K = 3</option>
+              <option value="4">K = 4</option>
+            </select>
+            <button class="guide-copy-btn" id="km-init">🎲 隨機放質心</button>
+            <button class="primary" id="km-step" style="margin:0">▶ 執行一步</button>
+            <button class="guide-copy-btn" id="km-run">⏩ 跑到收斂</button>
+          </div>
+        </div>
+        <canvas id="cl-canvas" width="560" height="260" class="lab-canvas"></canvas>
+        <div id="cl-status" style="margin:8px 0;font-size:13px;line-height:1.5;padding:8px 10px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0"></div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="guide-quiz-btn" id="cl-drill">🎯 實戰演練 KNN / K-means 考題</button>
+        </div>
+      </section>
+    `;
+
+    bindSubTabs();
+
+    // ---- 實驗 1：梯度下降 Canvas ----
+    let gdPath = [-2.5];
+    let gdTimer = null;
+    const gdCv = $('#gd-canvas');
+    const gdCtx = gdCv.getContext('2d');
+    const drawGd = () => {
+      const W = gdCv.width, H = gdCv.height;
+      gdCtx.clearRect(0, 0, W, H);
+      const mapX = (w) => ((w + 4) / 14) * (W - 40) + 20;
+      const mapY = (loss) => H - 24 - Math.min(loss, 52) / 52 * (H - 44);
+
+      // 座標軸與目標線 w=3
+      gdCtx.strokeStyle = '#cbd5e1';
+      gdCtx.lineWidth = 1;
+      gdCtx.beginPath();
+      gdCtx.moveTo(20, H - 24); gdCtx.lineTo(W - 20, H - 24);
+      gdCtx.stroke();
+      gdCtx.setLineDash([4, 4]);
+      gdCtx.beginPath();
+      gdCtx.moveTo(mapX(3), 15); gdCtx.lineTo(mapX(3), H - 24);
+      gdCtx.stroke();
+      gdCtx.setLineDash([]);
+
+      // 畫 Loss 拋物線 L(w) = (w-3)^2 + 1
+      gdCtx.strokeStyle = '#2563eb';
+      gdCtx.lineWidth = 2.5;
+      gdCtx.beginPath();
+      for (let px = -4; px <= 10; px += 0.1) {
+        const x = mapX(px), y = mapY((px - 3) ** 2 + 1);
+        px === -4 ? gdCtx.moveTo(x, y) : gdCtx.lineTo(x, y);
+      }
+      gdCtx.stroke();
+
+      // 畫軌跡連線
+      gdCtx.strokeStyle = '#f59e0b';
+      gdCtx.lineWidth = 1.8;
+      gdCtx.beginPath();
+      gdPath.forEach((w, idx) => {
+        const x = mapX(Math.max(-4.5, Math.min(10.5, w)));
+        const y = mapY((w - 3) ** 2 + 1);
+        idx === 0 ? gdCtx.moveTo(x, y) : gdCtx.lineTo(x, y);
+      });
+      gdCtx.stroke();
+
+      // 畫路徑點與當前紅球
+      gdPath.forEach((w, idx) => {
+        const isLast = idx === gdPath.length - 1;
+        const x = mapX(Math.max(-4.5, Math.min(10.5, w)));
+        const y = mapY((w - 3) ** 2 + 1);
+        gdCtx.fillStyle = isLast ? '#ef4444' : '#f59e0b';
+        gdCtx.beginPath();
+        gdCtx.arc(x, y, isLast ? 6.5 : 3.5, 0, Math.PI * 2);
+        gdCtx.fill();
+      });
+
+      const curW = gdPath[gdPath.length - 1];
+      const curLoss = (curW - 3) ** 2 + 1;
+      const lr = +$('#gd-lr').value;
+      let hint = '穩步朝最低點 (w = 3) 收斂中。';
+      if (Math.abs(curW - 3) < 0.05) hint = '✅ 已成功收斂到最低點！誤差接近最小值 1.0。';
+      else if (lr > 1.0) hint = '💥 學習率過大（η > 1），步伐跨過對面山坡且越跳越高，發生「發散」！';
+      else if (lr >= 0.8) hint = '⚡ 學習率偏大，球會在谷底兩側「來回震盪」，很難靜止。';
+      else if (lr <= 0.08 && gdPath.length > 1) hint = '🐢 學習率太小，雖然方向正確但步伐太碎，收斂非常慢。';
+
+      $('#gd-status').innerHTML = `步數：<b>${gdPath.length - 1}</b> ｜ 目前權重 w = <b>${curW.toFixed(2)}</b> ｜ 誤差 Loss = <b>${curLoss.toFixed(2)}</b><br>${hint}`;
+    };
+
+    const stepGd = () => {
+      const cur = gdPath[gdPath.length - 1];
+      const lr = +$('#gd-lr').value;
+      const { nextW } = gdStep(cur, lr);
+      if (Math.abs(nextW) > 1e4) return false;
+      gdPath.push(nextW);
+      drawGd();
+      return true;
+    };
+
+    $('#gd-lr').oninput = (e) => { $('#gd-lr-val').textContent = (+e.target.value).toFixed(2); drawGd(); };
+    view.querySelectorAll('.gd-preset').forEach((b) => {
+      b.onclick = () => {
+        if (gdTimer) { clearInterval(gdTimer); gdTimer = null; }
+        $('#gd-lr').value = b.dataset.lr;
+        $('#gd-lr-val').textContent = (+b.dataset.lr).toFixed(2);
+        gdPath = [-2.5];
+        drawGd();
+      };
+    });
+    $('#gd-step').onclick = stepGd;
+    $('#gd-reset').onclick = () => {
+      if (gdTimer) { clearInterval(gdTimer); gdTimer = null; }
+      gdPath = [-2.5];
+      drawGd();
+    };
+    $('#gd-auto').onclick = () => {
+      if (gdTimer) { clearInterval(gdTimer); gdTimer = null; }
+      let left = 10;
+      gdTimer = setInterval(() => {
+        if (left-- <= 0 || !stepGd()) { clearInterval(gdTimer); gdTimer = null; }
+      }, 220);
+    };
+    $('#gd-drill').onclick = () => {
+      const pool = DATA.questions.filter((q) => /梯度|學習率|Adam|SGD/i.test(`${q.question} ${q.explanation || ''}`));
+      if (pool.length) runPractice(shuffle(pool), { title: '梯度下降與學習率實戰練習' });
+    };
+    drawGd();
+
+    // ---- 實驗 2：KNN vs K-means Canvas ----
+    let clMode = 'knn';
+    const clCv = $('#cl-canvas');
+    const clCtx = clCv.getContext('2d');
+    const knnData = [
+      { x: 110, y: 75, c: 'A' }, { x: 145, y: 110, c: 'A' }, { x: 95, y: 135, c: 'A' },
+      { x: 170, y: 65, c: 'A' }, { x: 195, y: 120, c: 'A' }, { x: 135, y: 165, c: 'A' },
+      { x: 350, y: 160, c: 'A' }, // 刻意放一個在紅區裡的藍離群點，演示 K=1 過擬合！
+      { x: 380, y: 140, c: 'B' }, { x: 420, y: 185, c: 'B' }, { x: 345, y: 205, c: 'B' },
+      { x: 455, y: 130, c: 'B' }, { x: 410, y: 95, c: 'B' }, { x: 475, y: 195, c: 'B' },
+      { x: 315, y: 120, c: 'B' },
+    ];
+    let queryPt = { x: 325, y: 155 };
+
+    const kmPts = [
+      { x: 100, y: 70 }, { x: 130, y: 95 }, { x: 85, y: 110 }, { x: 145, y: 65 }, { x: 115, y: 125 }, { x: 160, y: 100 },
+      { x: 270, y: 185 }, { x: 300, y: 210 }, { x: 255, y: 220 }, { x: 325, y: 190 }, { x: 290, y: 160 }, { x: 340, y: 225 },
+      { x: 420, y: 65 }, { x: 455, y: 90 }, { x: 405, y: 105 }, { x: 470, y: 65 }, { x: 440, y: 120 }, { x: 490, y: 95 },
+    ];
+    const kmColors = ['#2563eb', '#ef4444', '#16a34a', '#9333ea'];
+    let centroids = [];
+    let assigns = [];
+    let kmIter = 0;
+
+    const initKm = () => {
+      const k = +$('#km-k').value;
+      centroids = Array.from({ length: k }, (_, idx) => ({
+        x: 90 + idx * 140 + (Math.random() - 0.5) * 40,
+        y: 60 + Math.random() * 140,
+      }));
+      assigns = kmPts.map(() => -1);
+      kmIter = 0;
+    };
+
+    const stepKm = () => {
+      // 1. 每個點歸到最近質心
+      let changed = false;
+      assigns = kmPts.map((pt, idx) => {
+        let best = 0, bestD = Infinity;
+        centroids.forEach((c, ci) => {
+          const d = (pt.x - c.x) ** 2 + (pt.y - c.y) ** 2;
+          if (d < bestD) { bestD = d; best = ci; }
+        });
+        if (assigns[idx] !== best) changed = true;
+        return best;
+      });
+      // 2. 質心移動到該群平均中心
+      centroids = centroids.map((c, ci) => {
+        const mems = kmPts.filter((_, idx) => assigns[idx] === ci);
+        if (!mems.length) return c;
+        return {
+          x: mems.reduce((s, p) => s + p.x, 0) / mems.length,
+          y: mems.reduce((s, p) => s + p.y, 0) / mems.length,
+        };
+      });
+      kmIter++;
+      return changed;
+    };
+
+    const drawCl = () => {
+      const W = clCv.width, H = clCv.height;
+      clCtx.clearRect(0, 0, W, H);
+      if (clMode === 'knn') {
+        const K = +$('#knn-k').value;
+        const dists = knnData.map((p) => ({ ...p, d: Math.hypot(p.x - queryPt.x, p.y - queryPt.y) })).sort((a, b) => a.d - b.d);
+        const topK = dists.slice(0, K);
+        const radius = topK[topK.length - 1].d;
+
+        // 範圍圓與虛線
+        clCtx.strokeStyle = 'rgba(22, 163, 74, 0.35)';
+        clCtx.fillStyle = 'rgba(22, 163, 74, 0.06)';
+        clCtx.beginPath();
+        clCtx.arc(queryPt.x, queryPt.y, radius, 0, Math.PI * 2);
+        clCtx.fill(); clCtx.stroke();
+
+        clCtx.setLineDash([4, 4]);
+        clCtx.strokeStyle = '#64748b';
+        topK.forEach((p) => {
+          clCtx.beginPath(); clCtx.moveTo(queryPt.x, queryPt.y); clCtx.lineTo(p.x, p.y); clCtx.stroke();
+        });
+        clCtx.setLineDash([]);
+
+        knnData.forEach((p) => {
+          clCtx.fillStyle = p.c === 'A' ? '#2563eb' : '#ef4444';
+          clCtx.beginPath(); clCtx.arc(p.x, p.y, 6, 0, Math.PI * 2); clCtx.fill();
+        });
+
+        // 畫新資料點 ★
+        clCtx.fillStyle = '#16a34a';
+        clCtx.font = 'bold 20px sans-serif';
+        clCtx.textAlign = 'center';
+        clCtx.textBaseline = 'middle';
+        clCtx.fillText('★', queryPt.x, queryPt.y);
+
+        const votesA = topK.filter((p) => p.c === 'A').length;
+        const votesB = K - votesA;
+        const win = votesA > votesB ? '🔵 藍類 (A)' : '🔴 紅類 (B)';
+        $('#cl-status').innerHTML = `<b>KNN（監督式分類）</b>：找出最近的 <b>${K}</b> 個已知標籤鄰居 → 🔵 ${votesA} 票 vs 🔴 ${votesB} 票 → 判定新點屬於 <b>${win}</b>！${K === 1 ? '<br>⚠️ K=1 時最容易受單一離群點（雜訊）影響而過擬合！' : ''}`;
+      } else {
+        kmPts.forEach((p, idx) => {
+          const ci = assigns[idx];
+          if (ci >= 0 && centroids[ci]) {
+            clCtx.strokeStyle = 'rgba(100,116,139,0.25)';
+            clCtx.beginPath(); clCtx.moveTo(p.x, p.y); clCtx.lineTo(centroids[ci].x, centroids[ci].y); clCtx.stroke();
+          }
+          clCtx.fillStyle = ci >= 0 ? kmColors[ci] : '#475569';
+          clCtx.beginPath(); clCtx.arc(p.x, p.y, 5.5, 0, Math.PI * 2); clCtx.fill();
+        });
+        centroids.forEach((c, ci) => {
+          clCtx.fillStyle = kmColors[ci];
+          clCtx.font = 'bold 22px sans-serif';
+          clCtx.textAlign = 'center';
+          clCtx.textBaseline = 'middle';
+          clCtx.fillText('★', c.x, c.y);
+        });
+        $('#cl-status').innerHTML = `<b>K-means（非監督式分群）</b>：第 <b>${kmIter}</b> 次疊代（共 ${centroids.length} 群）。無須事先標註答案，純粹計算距離讓相近的點抱團。`;
+      }
+    };
+
+    clCv.onclick = (e) => {
+      if (clMode !== 'knn') return;
+      const r = clCv.getBoundingClientRect();
+      queryPt = {
+        x: (e.clientX - r.left) * (clCv.width / r.width),
+        y: (e.clientY - r.top) * (clCv.height / r.height),
+      };
+      drawCl();
+    };
+    $('#knn-k').oninput = (e) => { $('#knn-k-val').textContent = e.target.value; drawCl(); };
+    $('#lab-mode-knn').onclick = () => {
+      clMode = 'knn';
+      $('#lab-mode-knn').classList.add('on'); $('#lab-mode-km').classList.remove('on');
+      $('#knn-controls').hidden = false; $('#km-controls').hidden = true;
+      drawCl();
+    };
+    $('#lab-mode-km').onclick = () => {
+      clMode = 'km';
+      $('#lab-mode-km').classList.add('on'); $('#lab-mode-knn').classList.remove('on');
+      $('#km-controls').hidden = false; $('#knn-controls').hidden = true;
+      if (!centroids.length) initKm();
+      drawCl();
+    };
+    $('#km-k').onchange = () => { initKm(); drawCl(); };
+    $('#km-init').onclick = () => { initKm(); drawCl(); };
+    $('#km-step').onclick = () => { stepKm(); drawCl(); };
+    $('#km-run').onclick = () => {
+      for (let i = 0; i < 15; i++) { if (!stepKm()) break; }
+      drawCl();
+    };
+    $('#cl-drill').onclick = () => {
+      const pool = DATA.questions.filter((q) => /KNN|K-means|分群|監督/i.test(`${q.question} ${q.explanation || ''}`));
+      if (pool.length) runPractice(shuffle(pool.slice(0, 25)), { title: 'KNN vs K-means 實戰練習' });
+    };
+    drawCl();
+  };
+
   const render = () => {
     if (guideSubMode === 'units') {
       renderUnits();
+      return;
+    }
+    if (guideSubMode === 'labs') {
+      renderLabs();
       return;
     }
     const kw = guideSearchKw.trim().toLowerCase();
@@ -2044,6 +2387,7 @@ function wrongbook() {
       ${filtered.length ? `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
           <button class="primary" id="drill" style="margin:0">只練全部錯題（${filtered.length} 題）</button>
+          <button class="guide-copy-btn" id="ai-wrong-prompt-btn" style="margin:0;background:#eef2ff!important;border-color:#a5b4fc!important;color:#3730a3!important;font-weight:700">🤖 複製錯題給 AI 寫弱點講義</button>
           <button class="notion-btn" id="notion-wrong-sync" style="margin:0">📌 錯題同步至 Notion</button>
           <button class="notion-btn alt" id="notion-wrong-exp" style="margin:0">📋 複製 Notion 格式</button>
           <span id="notion-wrong-msg" class="muted" style="font-size:12px"></span>
@@ -2122,6 +2466,17 @@ function wrongbook() {
         }
         btn.disabled = false;
         msg.textContent = notionBatchMsg(count, filtered.length, failed);
+      };
+    }
+    if (filtered.length && $('#ai-wrong-prompt-btn')) {
+      $('#ai-wrong-prompt-btn').onclick = async () => {
+        const promptText = buildWrongDiagnosisPrompt(filtered, store.q, store.terms, { levelLabel: lv });
+        try {
+          await navigator.clipboard.writeText(promptText);
+          $('#notion-wrong-msg').textContent = '✓ 已複製錯題＋名詞卡診斷 Prompt！直接貼給 Claude / ChatGPT / Gemini 即可產出白話弱點講義。';
+        } catch {
+          $('#notion-wrong-msg').textContent = '複製失敗';
+        }
       };
     }
     if (filtered.length && $('#notion-wrong-exp')) {
